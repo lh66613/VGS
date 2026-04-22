@@ -5,13 +5,19 @@ project:
 model:
   name: LLaVA-1.5-7B
   source: hf
-  checkpoint_path: null
-  loader_type: null
+  checkpoint_path: /data/lh/ModelandDataset/llava-1.5-7b-hf
+  loader_type: LlavaForConditionalGeneration
   freeze_weights: true
-  implementation_note: "Do not mix official and HF implementations in one study."
+  torch_dtype: float16
+  device_map: auto
+  implementation_note: "HF implementation fixed for this project unless explicitly changed before any formal run."
 
 dataset:
   pope_dir: data/pope
+  pope_family: coco
+  questions_dir: data/pope/questions
+  images_dir: data/pope/images
+  question_file_pattern: "{family}_pope_{subset}.json"
   subsets: [random, popular, adversarial]
   split_policy: fixed_seed
   train_ratio: 0.7

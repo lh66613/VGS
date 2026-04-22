@@ -27,10 +27,26 @@ tests/                   lightweight unit tests
 ## Quick Start
 
 ```bash
-python -m pip install -e ".[dev]"
+conda activate after
+python scripts/validate_pope_data.py
 python scripts/run_pope_eval.py --help
 python scripts/analyze_spectrum.py --layers 8 12 --output-dir outputs/svd
 ```
 
 Every script accepts explicit CLI arguments and writes a JSON summary. Major runs
 append one line to [notes/experiment_log.md](notes/experiment_log.md).
+
+## Current Local Setup
+
+- Conda environment: `after`
+- Model path: `/data/lh/ModelandDataset/llava-1.5-7b-hf`
+- Model implementation: Hugging Face `LlavaForConditionalGeneration`
+- Main POPE family: `coco`
+- POPE question files:
+  - `data/pope/questions/coco_pope_random.json`
+  - `data/pope/questions/coco_pope_popular.json`
+  - `data/pope/questions/coco_pope_adversarial.json`
+
+The current scaffold can validate local files without GPU. Full LLaVA inference
+needs a CUDA-visible environment because the checkpoint is too large for a
+practical CPU run.

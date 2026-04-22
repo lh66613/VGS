@@ -36,6 +36,16 @@ def write_csv(path: str | Path, rows: list[dict[str, Any]], fieldnames: list[str
     return target
 
 
+def write_jsonl(path: str | Path, rows: list[dict[str, Any]]) -> Path:
+    target = Path(path)
+    ensure_dir(target.parent)
+    with target.open("w", encoding="utf-8") as f:
+        for row in rows:
+            json.dump(row, f, ensure_ascii=False, sort_keys=True)
+            f.write("\n")
+    return target
+
+
 def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 

@@ -12,8 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from vgs.cli import add_common_args, add_k_args, add_layer_args, resolve_k_grid, resolve_layers
+from vgs.config import config_get, load_config
 from vgs.constants import DEFAULT_POPE_SUBSETS
-from vgs.io import append_experiment_log, write_json
+from vgs.datasets import load_pope_subset, validate_pope_samples
+from vgs.io import append_experiment_log, write_json, write_jsonl
+from vgs.llava_hf import generate_pope_answer, load_llava_hf, resolve_device
+from vgs.pope import classify_outcome, parse_yes_no
 
 
 def _finish(args: argparse.Namespace, stage: str, output_dir: str | Path, payload: dict[str, Any]) -> Path:
@@ -37,26 +41,141 @@ def run_pope_eval_main() -> None:
     add_common_args(parser)
     parser.add_argument("--model-source", choices=["hf", "official"], default="hf")
     parser.add_argument("--model-path", default=None)
-    parser.add_argument("--pope-dir", default="data/pope")
-    parser.add_argument("--subsets", nargs="+", default=DEFAULT_POPE_SUBSETS)
+    parser.add_argument("--family", default=None)
+    parser.add_argument("--questions-dir", default=None)
+    parser.add_argument("--images-dir", default=None)
+    parser.add_argument("--subsets", nargs="+", default=None)
     parser.add_argument("--split", default="test")
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=8)
+    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
+    parser.add_argument("--torch-dtype", default=None, choices=["float16", "bfloat16", "float32"])
+    parser.add_argument("--allow-cpu", action="store_true")
     parser.add_argument("--output-dir", default="outputs/predictions")
     args = parser.parse_args()
-    _finish(
-        args,
-        "run_pope_eval",
-        args.output_dir,
-        {
-            "model_source": args.model_source,
-            "model_path": args.model_path,
-            "pope_dir": args.pope_dir,
-            "subsets": args.subsets,
-            "split": args.split,
-            "max_samples": args.max_samples,
-            "todo": "Implement model loading, generation, yes/no parsing, and confusion labels.",
-        },
+
+    config = load_config(args.config)
+    model_path = args.model_path or config_get(config, "model.checkpoint_path")
+    family = args.family or config_get(config, "dataset.pope_family", "coco")
+    questions_dir = args.questions_dir or config_get(config, "dataset.questions_dir", "data/pope/questions")
+    images_dir = args.images_dir or config_get(config, "dataset.images_dir", "data/pope/images")
+    subsets = args.subsets or config_get(config, "dataset.subsets", DEFAULT_POPE_SUBSETS)
+    pattern = config_get(config, "dataset.question_file_pattern", "{family}_pope_{subset}.json")
+    torch_dtype = args.torch_dtype or config_get(config, "model.torch_dtype", "float16")
+
+    samples = []
+    for subset in subsets:
+        samples.extend(load_pope_subset(questions_dir, images_dir, family, subset, pattern))
+    if args.max_samples is not None:
+        samples = samples[: args.max_samples]
+
+    payload = {
+        "model_source": args.model_source,
+        "model_path": model_path,
+        "family": family,
+        "questions_dir": questions_dir,
+        "images_dir": images_dir,
+        "subsets": subsets,
+        "split": args.split,
+        "max_samples": args.max_samples,
+        "num_samples": len(samples),
+        "max_new_tokens": args.max_new_tokens,
+        "device": args.device,
+        "torch_dtype": torch_dtype,
+    }
+    if args.dry_run:
+        payload["todo"] = "Dry run only; no model loaded."
+        _finish(args, "run_pope_eval", args.output_dir, payload)
+        return
+
+    if args.model_source != "hf":
+        raise NotImplementedError("Only the Hugging Face LLaVA path is implemented at this stage.")
+    resolved_device = resolve_device(args.device, allow_cpu=args.allow_cpu)
+    model, processor, resolved_device = load_llava_hf(
+        model_path,
+        device=resolved_device,
+        torch_dtype=torch_dtype,
+        allow_cpu=args.allow_cpu,
     )
+
+    rows = []
+    counts = {"TP": 0, "TN": 0, "FP": 0, "FN": 0, "unknown": 0}
+    for sample in samples:
+        raw_generation = generate_pope_answer(
+            model,
+            processor,
+            sample,
+            device=resolved_device,
+            max_new_tokens=args.max_new_tokens,
+        )
+        parsed_prediction = parse_yes_no(raw_generation)
+        outcome = classify_outcome(parsed_prediction, sample.label)
+        counts[outcome] += 1
+        rows.append(
+            {
+                **sample.to_json(),
+                "raw_generation": raw_generation,
+                "parsed_prediction": parsed_prediction,
+                "outcome": outcome,
+            }
+        )
+
+    output_dir = Path(args.output_dir)
+    predictions_path = write_jsonl(output_dir / "pope_predictions.jsonl", rows)
+    accuracy_denominator = sum(counts[key] for key in ["TP", "TN", "FP", "FN"])
+    accuracy = (
+        (counts["TP"] + counts["TN"]) / accuracy_denominator if accuracy_denominator else None
+    )
+    payload.update(
+        {
+            "resolved_device": resolved_device,
+            "predictions_path": str(predictions_path),
+            "counts": counts,
+            "accuracy": accuracy,
+        }
+    )
+    _finish(args, "run_pope_eval", args.output_dir, payload)
+
+
+def validate_pope_data_main() -> None:
+    parser = argparse.ArgumentParser(description="Validate local POPE question files and image paths.")
+    add_common_args(parser)
+    parser.add_argument("--family", default=None, help="POPE family prefix, e.g. coco, aokvqa, gqa.")
+    parser.add_argument("--questions-dir", default=None)
+    parser.add_argument("--images-dir", default=None)
+    parser.add_argument("--subsets", nargs="+", default=None)
+    parser.add_argument("--pattern", default=None)
+    parser.add_argument("--output-dir", default="outputs/predictions")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    family = args.family or config_get(config, "dataset.pope_family", "coco")
+    questions_dir = args.questions_dir or config_get(config, "dataset.questions_dir", "data/pope/questions")
+    images_dir = args.images_dir or config_get(config, "dataset.images_dir", "data/pope/images")
+    subsets = args.subsets or config_get(config, "dataset.subsets", DEFAULT_POPE_SUBSETS)
+    pattern = args.pattern or config_get(config, "dataset.question_file_pattern", "{family}_pope_{subset}.json")
+
+    samples = []
+    per_subset = {}
+    for subset in subsets:
+        subset_samples = load_pope_subset(questions_dir, images_dir, family, subset, pattern)
+        samples.extend(subset_samples)
+        per_subset[subset] = validate_pope_samples(subset_samples)
+
+    validation = validate_pope_samples(samples)
+    payload = {
+        "family": family,
+        "questions_dir": questions_dir,
+        "images_dir": images_dir,
+        "subsets": subsets,
+        "pattern": pattern,
+        "overall": validation,
+        "per_subset": per_subset,
+    }
+    status = "ok" if validation["ok"] else "failed"
+    summary_path = write_json(Path(args.output_dir) / "validate_pope_data_summary.json", payload)
+    append_experiment_log(args.log_path, "validate_pope_data", summary_path, status)
+    print(summary_path)
 
 
 def dump_hidden_states_main() -> None:
