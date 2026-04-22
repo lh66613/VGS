@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Large local artifacts
+data/pope/*
+data/chair_optional/*
+data/cache/*
+outputs/**
+
+# Keep directory placeholders
+!data/**/.gitkeep
+!outputs/**/.gitkeep

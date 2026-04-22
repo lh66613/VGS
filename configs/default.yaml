@@ -1,0 +1,45 @@
+project:
+  name: vgs
+  seed: 42
+
+model:
+  name: LLaVA-1.5-7B
+  source: hf
+  checkpoint_path: null
+  loader_type: null
+  freeze_weights: true
+  implementation_note: "Do not mix official and HF implementations in one study."
+
+dataset:
+  pope_dir: data/pope
+  subsets: [random, popular, adversarial]
+  split_policy: fixed_seed
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+
+hidden_states:
+  stream: post_block
+  layers: [8, 12, 16, 20, 24, 28, 32]
+  primary_readout_position: last_prompt_token
+  secondary_readout_position: first_answer_prefill
+  candidate_readout_positions:
+    - last_prompt_token
+    - first_answer_prefill
+    - mean_last_4_prompt_tokens
+    - image_adjacent_text_token
+
+svd:
+  k_grid: [4, 8, 16, 32, 48, 64]
+  default_k: null
+  split_half_repeats: 20
+
+outputs:
+  predictions_dir: outputs/predictions
+  hidden_states_dir: outputs/hidden_states
+  svd_dir: outputs/svd
+  probes_dir: outputs/probes
+  plots_dir: outputs/plots
+  interventions_dir: outputs/interventions
+  semantics_dir: outputs/semantics
+  sanity_checks_dir: outputs/sanity_checks
