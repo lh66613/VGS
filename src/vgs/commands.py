@@ -11,13 +11,25 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+import torch
+from tqdm.auto import tqdm
+
+from vgs.analysis import (
+    analyze_k_sensitivity,
+    analyze_spectra,
+    build_difference_matrices,
+    compare_probe_features,
+    layerwise_summary,
+    train_probe_models,
+)
 from vgs.cli import add_common_args, add_k_args, add_layer_args, resolve_k_grid, resolve_layers
 from vgs.config import config_get, load_config
 from vgs.constants import DEFAULT_POPE_SUBSETS
 from vgs.datasets import load_pope_subset, validate_pope_samples
 from vgs.io import append_experiment_log, write_json, write_jsonl
-from vgs.llava_hf import generate_pope_answer, load_llava_hf, resolve_device
+from vgs.llava_hf import extract_hidden_pair, generate_pope_answer, load_llava_hf, resolve_device
 from vgs.pope import classify_outcome, parse_yes_no
+from vgs.artifacts import read_jsonl, save_hidden_layer
 
 
 def _finish(args: argparse.Namespace, stage: str, output_dir: str | Path, payload: dict[str, Any]) -> Path:
@@ -64,7 +76,7 @@ def run_pope_eval_main() -> None:
     torch_dtype = args.torch_dtype or config_get(config, "model.torch_dtype", "float16")
 
     samples = []
-    for subset in subsets:
+    for subset in tqdm(subsets, desc="load POPE subsets", unit="subset"):
         samples.extend(load_pope_subset(questions_dir, images_dir, family, subset, pattern))
     if args.max_samples is not None:
         samples = samples[: args.max_samples]
@@ -100,7 +112,7 @@ def run_pope_eval_main() -> None:
 
     rows = []
     counts = {"TP": 0, "TN": 0, "FP": 0, "FN": 0, "unknown": 0}
-    for sample in samples:
+    for sample in tqdm(samples, desc="POPE generation", unit="sample"):
         raw_generation = generate_pope_answer(
             model,
             processor,
@@ -157,7 +169,7 @@ def validate_pope_data_main() -> None:
 
     samples = []
     per_subset = {}
-    for subset in subsets:
+    for subset in tqdm(subsets, desc="validate POPE subsets", unit="subset"):
         subset_samples = load_pope_subset(questions_dir, images_dir, family, subset, pattern)
         samples.extend(subset_samples)
         per_subset[subset] = validate_pope_samples(subset_samples)
@@ -185,25 +197,93 @@ def dump_hidden_states_main() -> None:
     parser.add_argument("--model-source", choices=["hf", "official"], default="hf")
     parser.add_argument("--model-path", default=None)
     parser.add_argument("--predictions", default="outputs/predictions/pope_predictions.jsonl")
-    parser.add_argument("--pope-dir", default="data/pope")
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
+    parser.add_argument("--torch-dtype", default=None, choices=["float16", "bfloat16", "float32"])
+    parser.add_argument("--allow-cpu", action="store_true")
     parser.add_argument("--readout-position", default="last_prompt_token")
     parser.add_argument("--hidden-stream", default="post_block")
     parser.add_argument("--output-dir", default="outputs/hidden_states")
     args = parser.parse_args()
+    config = load_config(args.config)
+    model_path = args.model_path or config_get(config, "model.checkpoint_path")
+    torch_dtype = args.torch_dtype or config_get(config, "model.torch_dtype", "float16")
+    layers = resolve_layers(args)
+    payload = {
+        "layers": layers,
+        "model_source": args.model_source,
+        "model_path": model_path,
+        "predictions": args.predictions,
+        "max_samples": args.max_samples,
+        "readout_position": args.readout_position,
+        "hidden_stream": args.hidden_stream,
+        "device": args.device,
+        "torch_dtype": torch_dtype,
+    }
+    if args.dry_run:
+        payload["todo"] = "Dry run only; no model loaded."
+        _finish(args, "dump_hidden_states", args.output_dir, payload)
+        return
+
+    if args.model_source != "hf":
+        raise NotImplementedError("Only the Hugging Face LLaVA path is implemented at this stage.")
+    resolved_device = resolve_device(args.device, allow_cpu=args.allow_cpu)
+    model, processor, resolved_device = load_llava_hf(
+        model_path,
+        device=resolved_device,
+        torch_dtype=torch_dtype,
+        allow_cpu=args.allow_cpu,
+    )
+    rows = read_jsonl(args.predictions)
+    if args.max_samples is not None:
+        rows = rows[: args.max_samples]
+
+    layer_img = {layer: [] for layer in layers}
+    layer_blind = {layer: [] for layer in layers}
+    sample_ids = []
+    for row in tqdm(rows, desc="dump hidden states", unit="sample"):
+        sample_ids.append(str(row["sample_id"]))
+        pairs = extract_hidden_pair(
+            model,
+            processor,
+            row,
+            layers,
+            resolved_device,
+            readout_position=args.readout_position,
+        )
+        for layer, (z_img, z_blind) in pairs.items():
+            layer_img[layer].append(z_img)
+            layer_blind[layer].append(z_blind)
+
+    artifacts = []
+    for layer in tqdm(layers, desc="save hidden layers", unit="layer"):
+        path = save_hidden_layer(
+            args.output_dir,
+            layer,
+            sample_ids,
+            z_img=torch.stack(layer_img[layer]),
+            z_blind=torch.stack(layer_blind[layer]),
+            metadata={
+                "model_path": model_path,
+                "model_source": args.model_source,
+                "readout_position": args.readout_position,
+                "hidden_stream": args.hidden_stream,
+                "predictions": args.predictions,
+            },
+        )
+        artifacts.append(str(path))
+    payload.update(
+        {
+            "resolved_device": resolved_device,
+            "num_samples": len(sample_ids),
+            "artifacts": artifacts,
+        }
+    )
     _finish(
         args,
         "dump_hidden_states",
         args.output_dir,
-        {
-            "layers": resolve_layers(args),
-            "model_source": args.model_source,
-            "model_path": args.model_path,
-            "predictions": args.predictions,
-            "pope_dir": args.pope_dir,
-            "readout_position": args.readout_position,
-            "hidden_stream": args.hidden_stream,
-            "todo": "Implement paired image/blind forward passes and tensor serialization.",
-        },
+        payload,
     )
 
 
@@ -220,17 +300,26 @@ def build_difference_matrix_main() -> None:
     parser.add_argument("--split", default="test")
     parser.add_argument("--output-dir", default="outputs/svd")
     args = parser.parse_args()
+    payload = {
+        "layers": resolve_layers(args),
+        "hidden_states_dir": args.hidden_states_dir,
+        "control": args.control,
+        "split": args.split,
+    }
+    if not args.dry_run:
+        rows = build_difference_matrices(
+            resolve_layers(args),
+            args.hidden_states_dir,
+            args.output_dir,
+            args.control,
+            args.seed,
+        )
+        payload["artifacts"] = rows
     _finish(
         args,
         "build_difference_matrix",
         args.output_dir,
-        {
-            "layers": resolve_layers(args),
-            "hidden_states_dir": args.hidden_states_dir,
-            "control": args.control,
-            "split": args.split,
-            "todo": "Load hidden states, align sample IDs, apply controls, and save D_layer_{l}.pt.",
-        },
+        payload,
     )
 
 
@@ -242,16 +331,20 @@ def analyze_spectrum_main() -> None:
     parser.add_argument("--plot-dir", default="outputs/plots")
     parser.add_argument("--output-dir", default="outputs/svd")
     args = parser.parse_args()
+    payload = {
+        "layers": resolve_layers(args),
+        "matrix_dir": args.matrix_dir,
+        "plot_dir": args.plot_dir,
+    }
+    if not args.dry_run:
+        payload["summary_rows"] = analyze_spectra(
+            resolve_layers(args), args.matrix_dir, args.output_dir, args.plot_dir
+        )
     _finish(
         args,
         "analyze_spectrum",
         args.output_dir,
-        {
-            "layers": resolve_layers(args),
-            "matrix_dir": args.matrix_dir,
-            "plot_dir": args.plot_dir,
-            "todo": "Run SVD per layer, save spectra, effective ranks, and plots.",
-        },
+        payload,
     )
 
 
@@ -261,20 +354,52 @@ def analyze_k_sensitivity_main() -> None:
     add_layer_args(parser)
     add_k_args(parser)
     parser.add_argument("--svd-dir", default="outputs/svd")
+    parser.add_argument("--matrix-dir", default="outputs/svd")
     parser.add_argument("--probe-dir", default="outputs/probes")
+    parser.add_argument("--plot-dir", default="outputs/plots")
+    parser.add_argument("--repeats", type=int, default=10)
+    parser.add_argument(
+        "--stability-sample-size",
+        type=int,
+        default=1024,
+        help="Rows used for split-half stability estimation; <=0 means all rows.",
+    )
+    parser.add_argument(
+        "--stability-method",
+        choices=["randomized", "exact"],
+        default="randomized",
+        help="Method for split-half top-K subspace estimation.",
+    )
     parser.add_argument("--output-dir", default="outputs/svd")
     args = parser.parse_args()
+    payload = {
+        "layers": resolve_layers(args),
+        "k_grid": resolve_k_grid(args),
+        "svd_dir": args.svd_dir,
+        "matrix_dir": args.matrix_dir,
+        "probe_dir": args.probe_dir,
+        "repeats": args.repeats,
+        "stability_method": args.stability_method,
+        "stability_sample_size": args.stability_sample_size,
+    }
+    if not args.dry_run:
+        payload["summary_rows"] = analyze_k_sensitivity(
+            resolve_layers(args),
+            resolve_k_grid(args),
+            args.svd_dir,
+            args.matrix_dir,
+            args.output_dir,
+            args.plot_dir,
+            args.seed,
+            args.repeats,
+            args.stability_method,
+            None if args.stability_sample_size <= 0 else args.stability_sample_size,
+        )
     _finish(
         args,
         "analyze_k_sensitivity",
         args.output_dir,
-        {
-            "layers": resolve_layers(args),
-            "k_grid": resolve_k_grid(args),
-            "svd_dir": args.svd_dir,
-            "probe_dir": args.probe_dir,
-            "todo": "Merge explained variance, stability, and probe metrics across K.",
-        },
+        payload,
     )
 
 
@@ -289,19 +414,30 @@ def train_probe_main() -> None:
     parser.add_argument("--svd-dir", default="outputs/svd")
     parser.add_argument("--output-dir", default="outputs/probes")
     args = parser.parse_args()
+    payload = {
+        "layers": resolve_layers(args),
+        "k_grid": resolve_k_grid(args),
+        "feature_family": args.feature_family,
+        "predictions": args.predictions,
+        "hidden_states_dir": args.hidden_states_dir,
+        "svd_dir": args.svd_dir,
+    }
+    if not args.dry_run:
+        payload["summary_rows"] = train_probe_models(
+            resolve_layers(args),
+            resolve_k_grid(args),
+            args.feature_family,
+            args.predictions,
+            args.hidden_states_dir,
+            args.svd_dir,
+            args.output_dir,
+            args.seed,
+        )
     _finish(
         args,
         "train_probe",
         args.output_dir,
-        {
-            "layers": resolve_layers(args),
-            "k_grid": resolve_k_grid(args),
-            "feature_family": args.feature_family,
-            "predictions": args.predictions,
-            "hidden_states_dir": args.hidden_states_dir,
-            "svd_dir": args.svd_dir,
-            "todo": "Build feature matrices and train/evaluate logistic regression probes.",
-        },
+        payload,
     )
 
 
@@ -313,16 +449,18 @@ def compare_features_main() -> None:
     parser.add_argument("--probe-dir", default="outputs/probes")
     parser.add_argument("--output-dir", default="outputs/probes")
     args = parser.parse_args()
+    payload = {
+        "layers": resolve_layers(args),
+        "k_grid": resolve_k_grid(args),
+        "probe_dir": args.probe_dir,
+    }
+    if not args.dry_run:
+        payload["summary_rows"] = compare_probe_features(args.probe_dir, args.output_dir)
     _finish(
         args,
         "compare_features",
         args.output_dir,
-        {
-            "layers": resolve_layers(args),
-            "k_grid": resolve_k_grid(args),
-            "probe_dir": args.probe_dir,
-            "todo": "Aggregate probe results into comparison tables and heatmaps.",
-        },
+        payload,
     )
 
 
@@ -336,18 +474,29 @@ def layerwise_analysis_main() -> None:
     parser.add_argument("--plot-dir", default="outputs/plots")
     parser.add_argument("--output-dir", default="outputs/svd")
     args = parser.parse_args()
+    payload = {
+        "layers": resolve_layers(args),
+        "k_grid": resolve_k_grid(args),
+        "svd_dir": args.svd_dir,
+        "probe_dir": args.probe_dir,
+        "plot_dir": args.plot_dir,
+    }
+    if not args.dry_run:
+        payload.update(
+            layerwise_summary(
+                resolve_layers(args),
+                resolve_k_grid(args),
+                args.svd_dir,
+                args.probe_dir,
+                args.output_dir,
+                args.plot_dir,
+            )
+        )
     _finish(
         args,
         "layerwise_analysis",
         args.output_dir,
-        {
-            "layers": resolve_layers(args),
-            "k_grid": resolve_k_grid(args),
-            "svd_dir": args.svd_dir,
-            "probe_dir": args.probe_dir,
-            "plot_dir": args.plot_dir,
-            "todo": "Compute adjacent/non-adjacent subspace angles and combined layer tables.",
-        },
+        payload,
     )
 
 

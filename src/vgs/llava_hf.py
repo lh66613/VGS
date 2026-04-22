@@ -70,6 +70,11 @@ def build_pope_prompt(processor: AutoProcessor, question: str) -> str:
     return f"USER: <image>\n{text} ASSISTANT:"
 
 
+def build_blind_prompt(question: str) -> str:
+    text = f"{question} Answer with yes or no only."
+    return f"USER: {text} ASSISTANT:"
+
+
 @torch.inference_mode()
 def generate_pope_answer(
     model: LlavaForConditionalGeneration,
@@ -81,7 +86,7 @@ def generate_pope_answer(
     image = Image.open(Path(sample.image_path)).convert("RGB")
     prompt = build_pope_prompt(processor, sample.question)
     inputs = processor(images=image, text=prompt, return_tensors="pt")
-    inputs = _move_inputs(inputs, device)
+    inputs = _move_inputs(inputs, device, dtype=next(model.parameters()).dtype)
     output_ids = model.generate(
         **inputs,
         max_new_tokens=max_new_tokens,
@@ -93,11 +98,58 @@ def generate_pope_answer(
     return processor.decode(generated_ids, skip_special_tokens=True).strip()
 
 
-def _move_inputs(inputs: Any, device: str) -> Any:
+@torch.inference_mode()
+def extract_hidden_pair(
+    model: LlavaForConditionalGeneration,
+    processor: AutoProcessor,
+    row: dict[str, Any],
+    layers: list[int],
+    device: str,
+    readout_position: str = "last_prompt_token",
+) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+    if readout_position != "last_prompt_token":
+        raise NotImplementedError(
+            "Only last_prompt_token is implemented for the first HF hidden-state dump."
+        )
+    image = Image.open(Path(row["image_path"])).convert("RGB")
+    image_prompt = build_pope_prompt(processor, row["question"])
+    image_inputs = processor(images=image, text=image_prompt, return_tensors="pt")
+    image_inputs = _move_inputs(image_inputs, device, dtype=next(model.parameters()).dtype)
+    image_outputs = model(
+        **image_inputs,
+        output_hidden_states=True,
+        return_dict=True,
+        use_cache=False,
+    )
+
+    blind_prompt = build_blind_prompt(row["question"])
+    blind_inputs = processor.tokenizer(blind_prompt, return_tensors="pt")
+    blind_inputs = _move_inputs(blind_inputs, device)
+    blind_outputs = model.language_model(
+        **blind_inputs,
+        output_hidden_states=True,
+        return_dict=True,
+        use_cache=False,
+    )
+
+    image_index = int(image_inputs["attention_mask"][0].sum().item()) - 1
+    blind_index = int(blind_inputs["attention_mask"][0].sum().item()) - 1
+    pairs: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    for layer in layers:
+        image_state = image_outputs.hidden_states[layer][0, image_index].detach().cpu().float()
+        blind_state = blind_outputs.hidden_states[layer][0, blind_index].detach().cpu().float()
+        pairs[layer] = (image_state, blind_state)
+    return pairs
+
+
+def _move_inputs(inputs: Any, device: str, dtype: torch.dtype | None = None) -> Any:
     moved = {}
     for key, value in inputs.items():
         if hasattr(value, "to"):
-            moved[key] = value.to(device)
+            if dtype is not None and torch.is_floating_point(value):
+                moved[key] = value.to(device=device, dtype=dtype)
+            else:
+                moved[key] = value.to(device)
         else:
             moved[key] = value
     return moved

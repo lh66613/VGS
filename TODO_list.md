@@ -22,44 +22,66 @@ A very small **optional sanity check** on a caption benchmark is added near the 
 
 ## 1. Fixed Experimental Settings
 
+### Current completed run snapshot
+
+- [x] Main implementation fixed to HuggingFace `LlavaForConditionalGeneration`
+- [x] Conda environment used for completed runs: `after`
+- [x] Model checkpoint path: `/data/lh/ModelandDataset/llava-1.5-7b-hf`
+- [x] Transformers version observed: `4.37.2`
+- [x] Torch version observed: `2.2.1+cu121`
+- [x] Main POPE family fixed to `coco`
+- [x] Full POPE run completed on 9000 samples
+- [x] Tested layers: `8 / 12 / 16 / 20 / 24 / 28 / 32`
+- [x] Current readout position: `last_prompt_token`
+- [x] Current hidden artifacts: `outputs/hidden_states/layer_{8,12,16,20,24,28,32}.pt`
+
 ### 1.1 Fixed model
 
-- [ ] Use only `LLaVA-1.5-7B`
-- [ ] Freeze all weights; no fine-tuning
-- [ ] Use one inference implementation and keep it unchanged across all experiments
-- [ ] Record exact model source / checkpoint path / loader type (`official` vs `HF`) / transformers version / torch version
-- [ ] Record whether hidden states are read from the official LLaVA implementation or the HuggingFace port
-- [ ] Do **not** mix implementations in the same study
+- [x] Use only `LLaVA-1.5-7B`
+- [x] Freeze all weights; no fine-tuning
+- [x] Use one inference implementation and keep it unchanged across all completed experiments
+- [x] Record exact model source / checkpoint path / loader type (`official` vs `HF`) / transformers version / torch version
+- [x] Record whether hidden states are read from the official LLaVA implementation or the HuggingFace port
+- [x] Do **not** mix implementations in the same study
 
 ### 1.2 Fixed dataset
 
-- [ ] Use only `POPE` for the full validation chain
-- [ ] Evaluate all three subsets if available:
-  - [ ] `random`
-  - [ ] `popular`
-  - [ ] `adversarial`
-- [ ] Keep the same image path resolution logic and question formatting across all runs
-- [ ] Save the exact sample IDs used in every experiment
-- [ ] Define train / val / test split policy once and keep it fixed for all probe experiments
+- [x] Use only `POPE` for the full validation chain completed so far
+- [x] Evaluate all three subsets if available:
+  - [x] `random`
+  - [x] `popular`
+  - [x] `adversarial`
+- [x] Keep the same image path resolution logic and question formatting across all completed runs
+- [x] Save the exact sample IDs used in every experiment
+- [x] Define train / val / test split policy once and keep it fixed for all probe experiments
+  - Current probe policy: deterministic stratified held-out split inside `train_test_split(random_state=42)`
+  - Future improvement: persist explicit train / val / test sample-id files
 
 ### 1.3 Fixed labels and outputs
 
-- [ ] Convert model outputs into binary yes/no predictions with one unified post-processing rule
-- [ ] Save raw generation text for each sample
-- [ ] Save parsed yes/no label for each sample
-- [ ] Save ground-truth label for each sample
-- [ ] Save whether the prediction is correct / FP hallucination / FN miss / TP / TN
+- [x] Convert model outputs into binary yes/no predictions with one unified post-processing rule
+- [x] Save raw generation text for each sample
+- [x] Save parsed yes/no label for each sample
+- [x] Save ground-truth label for each sample
+- [x] Save whether the prediction is correct / FP hallucination / FN miss / TP / TN
+
+Completed POPE prediction summary:
+
+- [x] `outputs/predictions/pope_predictions.jsonl`
+- [x] Accuracy: `0.8619`
+- [x] TP / TN / FP / FN: `3606 / 4151 / 349 / 894`
 
 ### 1.4 Fixed hidden-state extraction protocol
 
-- [ ] Decide once and keep fixed:
-  - [ ] which hidden stream to read (recommended: transformer block output / post-block hidden state)
-  - [ ] which layers to test first (recommended sparse set: 8 / 12 / 16 / 20 / 24 / 28 / 32)
-  - [ ] whether the representation is read from one token position or a pooled set of candidate positions
-- [ ] For each sample, extract both:
-  - [ ] `z_img^(l)` from image+question input
-  - [ ] `z_blind^(l)` from text-only / blind-reference input
-- [ ] Ensure the prompt template differs only in the image condition, not in wording
+- [x] Decide once and keep fixed for the completed main run:
+  - [x] which hidden stream to read (recommended: transformer block output / post-block hidden state)
+  - [x] which layers to test first (recommended sparse set: 8 / 12 / 16 / 20 / 24 / 28 / 32)
+  - [x] whether the representation is read from one token position or a pooled set of candidate positions
+- [x] For each sample, extract both:
+  - [x] `z_img^(l)` from image+question input
+  - [x] `z_blind^(l)` from text-only / blind-reference input
+- [x] Ensure the prompt template differs only in the image condition, not in wording
+- [ ] Revisit prompt/template exactness during Stage B, especially blind vs image chat template alignment
 
 ### 1.5 Token-position sensitivity protocol
 
@@ -74,19 +96,32 @@ Because the whole study depends on where the hidden state is read, do **not** ch
 - [ ] Choose one primary position based on the pilot and freeze it for the main study
 - [ ] Keep one secondary position only for robustness checks
 
+Current status:
+
+- [x] First main run uses `last_prompt_token`
+- [ ] Token-position pilot is still pending
+- [ ] Do not claim token-position robustness yet
+
 ### 1.6 Unified K-sensitivity protocol
 
 K must be treated as a first-class experimental variable rather than a scattered detail.
 
-- [ ] Predefine a global candidate set, e.g. `K in {4, 8, 16, 32, 48, 64}`
-- [ ] Use exactly the same K grid in Stages A / C / D / E / G whenever feasible
-- [ ] Report all main curves as functions of K, not just a best case
+- [x] Predefine a global candidate set, e.g. `K in {4, 8, 16, 32, 48, 64}`
+- [x] Extend Stage C deep grid to `K in {4, 8, 16, 32, 64, 128, 256}`
+- [x] Use exactly the same K grid in Stages A / C / D whenever feasible
+- [x] Report all main curves as functions of K, not just a best case
 - [ ] Choose a default `K*` only after Stage A + Stage C
 - [ ] Selection rule for `K*`:
   - [ ] prefer the smallest K that reaches near-peak predictive performance
   - [ ] prefer a stable K region over a single sharp optimum
-- [ ] If performance is flat across a wide range of K, explicitly note that this supports a concentrated low-rank structure
-- [ ] If performance only appears at large K, explicitly note that the low-rank hypothesis is weakened
+- [x] If performance is flat across a wide range of K, explicitly note that this supports a concentrated low-rank structure
+- [x] If performance only appears at large K, explicitly note that the low-rank hypothesis is weakened
+
+Current K finding:
+
+- [x] Variance concentration is strong at low K, but FP-vs-TN AUROC rises mainly at K=128/256
+- [x] Current interpretation: most variance-explaining directions are not the most hallucination-discriminative directions
+- [ ] Do not finalize a single `K*` yet; keep `K=128/256` as candidate predictive settings and `K=4` as a stable-structure setting
 
 ---
 
@@ -94,22 +129,23 @@ K must be treated as a first-class experimental variable rather than a scattered
 
 By the end of this TODO list, the project should produce:
 
-- [ ] one reproducible hidden-state dump pipeline
-- [ ] one reproducible POPE evaluation pipeline
-- [ ] one SVD analysis pipeline for all tested layers
-- [ ] one standardized K-sensitivity report
-- [ ] one probe baseline comparison table
-- [ ] one layerwise geometry report
+- [x] one reproducible hidden-state dump pipeline
+- [x] one reproducible POPE evaluation pipeline
+- [x] one SVD analysis pipeline for all tested layers
+- [x] one standardized K-sensitivity report
+- [x] one probe baseline comparison table
+- [x] one layerwise geometry report
 - [ ] one causal intervention pilot result
 - [ ] one semantic interpretation report for singular directions
 - [ ] one optional caption sanity-check report
-- [ ] one final summary document answering: “What has actually been validated?”
+- [x] one running summary document answering: “What has actually been validated?”
+  - Current file: `notes/findings.md`
 
 ---
 
 ## 3. Project Structure
 
-- [ ] Create / confirm folders:
+- [x] Create / confirm folders:
 
 ```text
 project/
@@ -138,7 +174,13 @@ project/
 │   ├── intervention_precheck.py
 │   ├── intervention_pilot.py
 │   ├── semantic_interpretation.py
-│   └── chair_sanity_check.py
+│   ├── chair_sanity_check.py
+│   ├── validate_pope_data.py
+│   ├── create_smoke_artifacts.py
+│   ├── analyze_stage_c_deep.py
+│   ├── run_gpu_pope_and_hidden.sh
+│   ├── run_cpu_stage_a.sh
+│   └── run_cpu_stage_c_d.sh
 └── notes/
     ├── experiment_log.md
     ├── findings.md
@@ -146,10 +188,11 @@ project/
     └── claim_evidence_table.md
 ```
 
-- [ ] Every script must accept explicit CLI args
-- [ ] Every script must save a JSON / CSV summary
-- [ ] Every major run must write one line into `notes/experiment_log.md`
-- [ ] Every figure must be reproducible from a saved command
+- [x] Every script must accept explicit CLI args
+- [x] Every script must save a JSON / CSV summary
+- [x] Every major run must write one line into `notes/experiment_log.md`
+- [x] Every figure must be reproducible from a saved command
+- [x] Add progress bars to long-running scripts
 
 ---
 
@@ -173,65 +216,75 @@ Validation is divided into eight stages, from weak evidence to strong evidence:
 ## A1. Build the difference matrix
 
 ### Task
-- [ ] For each tested layer `l`, compute
-  - [ ] `d_i^(l) = z_blind^(l) - z_img^(l)`
-- [ ] Stack them into `D^(l) in R^(N x d)`
-- [ ] Save one matrix per layer
+- [x] For each tested layer `l`, compute
+  - [x] `d_i^(l) = z_blind^(l) - z_img^(l)`
+- [x] Stack them into `D^(l) in R^(N x d)`
+- [x] Save one matrix per layer
 
 ### Output
-- [ ] `outputs/svd/D_layer_{l}.pt`
-- [ ] metadata file with sample IDs and split name
+- [x] `outputs/svd/D_layer_{l}.pt`
+- [x] metadata file with sample IDs and split name
 
 ---
 
 ## A2. Singular spectrum analysis
 
 ### Task
-- [ ] Run SVD on each `D^(l)`
-- [ ] Plot:
-  - [ ] singular values
-  - [ ] normalized singular values
-  - [ ] cumulative explained variance
-  - [ ] effective rank
+- [x] Run SVD on each `D^(l)`
+- [x] Plot:
+  - [x] singular values
+  - [x] normalized singular values
+  - [x] cumulative explained variance
+  - [x] effective rank
 
 ### What to check
-- [ ] Does the spectrum show clear decay?
-- [ ] Is there evidence of low-rank structure?
-- [ ] Which layers are most concentrated?
+- [x] Does the spectrum show clear decay?
+- [x] Is there evidence of low-rank structure?
+- [x] Which layers are most concentrated?
 
 ### Success criterion
 This stage supports the hypothesis if:
-- [ ] the top singular directions capture substantially more variance than the tail
-- [ ] effective rank is meaningfully smaller than `d`
-- [ ] some layers show sharper concentration than others
+- [x] the top singular directions capture substantially more variance than the tail
+- [x] effective rank is meaningfully smaller than `d`
+- [x] some layers show sharper concentration than others
 
 ### Output
-- [ ] `spectrum_layer_{l}.png`
-- [ ] `effective_rank_summary.csv`
+- [x] `spectrum_layer_{l}.png`
+- [x] `effective_rank_summary.csv`
+
+Completed observation:
+
+- [x] K=4 explained variance is high for L8/L12/L16/L20/L24/L28, lower for L32
+- [x] L32 appears less concentrated than middle layers
 
 ---
 
 ## A3. Split-half stability
 
 ### Task
-- [ ] Randomly split samples into two halves multiple times
-- [ ] Compute `V_K^(l)` on each half
-- [ ] Compare the two subspaces via:
+- [x] Randomly split samples into two halves multiple times
+- [x] Compute `V_K^(l)` on each half
+- [x] Compare the two subspaces via:
   - [ ] principal angles
-  - [ ] overlap / projection similarity
+  - [x] overlap / projection similarity
 
 ### What to check
-- [ ] Does the same layer produce similar subspaces across splits?
-- [ ] Is stability robust for multiple values of `K`?
+- [x] Does the same layer produce similar subspaces across splits?
+- [x] Is stability robust for multiple values of `K`?
 
 ### Success criterion
 This stage supports the hypothesis if:
-- [ ] top-K subspaces are stable across random splits
-- [ ] stability is significantly better than random-subspace baselines
+- [x] top-K subspaces are stable across random splits
+- [x] stability is significantly better than random-subspace baselines
 
 ### Output
-- [ ] `subspace_stability_layer_{l}.csv`
-- [ ] `subspace_stability_plot.png`
+- [x] `k_sensitivity_summary.csv`
+- [x] `k_sensitivity_plot.png`
+
+Implementation note:
+
+- [x] Stability currently uses randomized/subsampled split-half estimation for tractability
+- [ ] Exact full-data split-half stability remains optional
 
 ---
 
@@ -248,27 +301,33 @@ This stage supports the hypothesis if:
 This stage supports the hypothesis if:
 - [ ] the real data shows sharper spectra and stronger stability than shuffled controls
 
+Current status:
+
+- [ ] Not yet run. This is the main missing piece before making the strongest Stage A claim.
+
 ---
 
 ## A5. Dedicated K-sensitivity analysis
 
 ### Task
-- [ ] For each layer, summarize how stability and explained variance change with K
-- [ ] Plot:
-  - [ ] stability vs K
-  - [ ] explained variance vs K
-  - [ ] predictive performance placeholder vs K once Stage C is done
-- [ ] Mark the smallest K that reaches a stable region
+- [x] For each layer, summarize how stability and explained variance change with K
+- [x] Plot:
+  - [x] stability vs K
+  - [x] explained variance vs K
+  - [x] predictive performance placeholder vs K once Stage C is done
+- [x] Mark the smallest K that reaches a stable region
 
 ### Success criterion
 This stage supports the low-rank story if:
-- [ ] a small or moderate K already captures most stable structure
+- [x] a small or moderate K already captures most stable structure
 - [ ] there is a plateau rather than only late improvement at very large K
+  - Current predictive performance rises substantially at larger K; this weakens a simple low-K predictive story
 
 ### Decision after Stage A
 - [ ] If Stage A fails, stop all geometric interpretation claims
-- [ ] If Stage A passes, continue to Stage B
-- [ ] Propose 1–2 candidate values for `K*`, but do not finalize until Stage C
+- [x] If Stage A passes, continue to Stage B
+- [x] Propose 1–2 candidate values for `K*`, but do not finalize until Stage C
+  - Current candidates depend on purpose: `K=4` for stable dominant geometry, `K=128/256` for prediction
 
 ---
 
@@ -343,38 +402,47 @@ This stage supports the hypothesis if:
 
 ### Task
 Compare at least the following features for hallucination prediction:
-- [ ] raw `z_img^(l)`
-- [ ] raw `z_blind^(l)`
-- [ ] full difference vector `z_blind^(l) - z_img^(l)`
-- [ ] projected feature `V_K^(l)^T (z_blind^(l) - z_img^(l))`
-- [ ] random-K projection of the difference vector
-- [ ] PCA-K of `z_img^(l)` as a control
+- [x] raw `z_img^(l)`
+- [x] raw `z_blind^(l)`
+- [x] full difference vector `z_blind^(l) - z_img^(l)`
+- [x] projected feature `V_K^(l)^T (z_blind^(l) - z_img^(l))`
+- [x] random-K projection of the difference vector
+- [x] PCA-K of `z_img^(l)` as a control
 
 Use the same lightweight classifier for all, e.g. logistic regression.
 
 ### Task details
-- [ ] Train on one split of POPE
-- [ ] Evaluate on held-out split
-- [ ] Repeat for the global K grid
-- [ ] Repeat for multiple layers
+- [x] Train on one split of POPE
+- [x] Evaluate on held-out split
+- [x] Repeat for the global K grid
+- [x] Repeat for multiple layers
 
 ### Metrics
-- [ ] AUROC
-- [ ] AUPRC
-- [ ] accuracy
-- [ ] F1
-- [ ] especially report FP-detection quality
+- [x] AUROC
+- [x] AUPRC
+- [x] accuracy
+- [x] F1
+- [x] especially report FP-detection quality
 
 ### Success criterion
 This stage supports the hypothesis if:
 - [ ] the projected `V_K` feature remains competitive or superior at low dimensionality
+  - Current result: low-K projected features are not competitive; K=128/256 improves substantially
 - [ ] performance is more stable across POPE subsets
 - [ ] random projections do noticeably worse
+  - Current result: random controls can be nontrivial; more careful controls are needed
 
 ### Output
-- [ ] feature comparison table
-- [ ] AUROC-vs-K plot
-- [ ] layer-vs-feature heatmap
+- [x] feature comparison table
+- [x] AUROC-vs-K plot
+- [x] layer-vs-feature diagnostic plots
+
+Completed outputs:
+
+- [x] `outputs/probes/probe_results.csv`
+- [x] `outputs/probes/feature_comparison.csv`
+- [x] `outputs/stage_c_deep/stage_c_topk_curve.csv`
+- [x] `outputs/plots/stage_c_topk_auroc_explained_variance.png`
 
 ---
 
@@ -382,32 +450,66 @@ This stage supports the hypothesis if:
 
 ### Task
 Specifically test whether the geometric feature is **more compact**:
-- [ ] compare performance at the full K grid
-- [ ] compare against full hidden states and full difference vectors
+- [x] compare performance at the full K grid
+- [x] compare against full hidden states and full difference vectors
 
 ### Success criterion
 This stage supports the hypothesis if:
 - [ ] a very low-dimensional geometric feature preserves a large fraction of predictive power
+  - Current result: not supported for FP-vs-TN; best projected results appear at K=128/256
 
 ---
 
 ## C3. Finalize K*
 
 ### Task
-- [ ] Combine Stage A and Stage C results
+- [x] Combine Stage A and Stage C results
 - [ ] Select one default `K*` for later interpretation and interventions
-- [ ] Save a short note justifying why `K*` was chosen
+- [x] Save a short note justifying why `K*` was not finalized yet
 
 ### Success criterion
 - [ ] `K*` is chosen by an explicit rule, not by cherry-picking the single best number
 
 ### Interpretation allowed after Stage C
 If Stage C passes, it is reasonable to say:
-- [ ] the subspace is not just mathematically present
-- [ ] it carries structured hallucination-relevant information
+- [x] the subspace is not just mathematically present
+- [x] it carries structured hallucination-relevant information
 - [ ] it is more compact than generic raw-state probing
+  - Current result: compactness is not validated
 
 But do **not** yet claim causality.
+
+## C4. Deep Stage C follow-up — K curves, layer mismatch, and non-top-K bands
+
+### Task
+- [x] Plot AUROC-vs-K for every tested layer
+- [x] Plot explained-variance-vs-K beside AUROC-vs-K
+- [x] Compare L20 / L24 / L28 / L32 in detail
+- [x] Probe non-top-K SVD bands:
+  - [x] `1-4`
+  - [x] `5-8`
+  - [x] `9-16`
+  - [x] `17-32`
+  - [x] `33-64`
+  - [x] `65-128`
+  - [x] `129-256`
+- [x] Compare SVD bands against random-width controls
+
+### Outputs
+- [x] `outputs/stage_c_deep/stage_c_topk_curve.csv`
+- [x] `outputs/stage_c_deep/stage_c_band_probe.csv`
+- [x] `outputs/stage_c_deep/stage_c_layer_diagnostics.csv`
+- [x] `outputs/plots/stage_c_band_probe_auroc.png`
+- [x] `outputs/plots/stage_c_layer_diagnostics.png`
+
+### Current conclusion
+- [x] Variance growth and AUROC growth are not synchronized
+- [x] Top-4 directions explain most variance but are weakly discriminative
+- [x] L20 is strongest for top-K projection at K=256
+- [x] L24 is strongest for full difference
+- [x] L32 is weaker both in concentration and predictive behavior
+- [x] Best SVD band found so far: L20 directions `65-128`, AUROC `0.6317`
+- [x] Current wording: the main geometric structure and hallucination-discriminative structure are related but not identical
 
 ---
 
@@ -417,15 +519,15 @@ But do **not** yet claim causality.
 
 ### Task
 For each tested layer, summarize:
-- [ ] singular spectrum concentration
-- [ ] effective rank
-- [ ] split-half stability
-- [ ] best probe performance using projected features
-- [ ] preferred K region
+- [x] singular spectrum concentration
+- [x] effective rank
+- [x] split-half stability
+- [x] best probe performance using projected features
+- [x] preferred K region
 
 ### Output
-- [ ] one layerwise summary table
-- [ ] one combined figure
+- [x] one layerwise summary table
+- [x] one combined figure
 
 ---
 
@@ -433,25 +535,27 @@ For each tested layer, summarize:
 
 ### Task
 - [ ] Compute principal angles between `V_K^(l)` and `V_K^(l+1)`
-- [ ] Also compare non-adjacent layers
+- [x] Also compare non-adjacent layers via projection similarity
 
 ### What to check
-- [ ] Does the subspace gradually stabilize across layers?
-- [ ] Are there transition layers where the geometry changes sharply?
+- [x] Does the subspace gradually stabilize across layers?
+- [x] Are there transition layers where the geometry changes sharply?
 
 ### Success criterion
 This stage supports the hypothesis if:
-- [ ] the subspace shows interpretable layer-to-layer evolution instead of random fluctuations
+- [x] the subspace shows interpretable layer-to-layer evolution instead of random fluctuations
 - [ ] the strongest predictive layers align with the most stable / concentrated geometry
+  - Current result: concentration, stability, and predictive behavior are partly misaligned
 
 ### Output
-- [ ] layerwise angle heatmap
-- [ ] line plot of stability / rank / AUROC across layers
+- [x] layerwise angle heatmap
+- [x] line plot of stability / rank / AUROC across layers
 
 ### Interpretation allowed after Stage D
 If Stage D passes, it is reasonable to say:
-- [ ] the relevant geometric structure is organized across layers
-- [ ] there may exist a preferred “grounding-sensitive” stage in the network
+- [x] the relevant geometric structure is organized across layers
+- [x] there may exist a preferred “grounding-sensitive” stage in the network
+  - Candidate predictive stage: L16-L24, especially L20/L24 depending on feature family
 
 Still avoid causal wording until Stage E.
 
@@ -753,15 +857,15 @@ This stage is successful if:
 ## 13. Figures and Tables To Prepare
 
 ### Essential figures
-- [ ] singular value spectra by layer
-- [ ] cumulative explained variance by layer
-- [ ] effective rank by layer
-- [ ] split-half stability plot
-- [ ] stability-vs-K plot
+- [x] singular value spectra by layer
+- [x] cumulative explained variance by layer
+- [x] effective rank by layer
+- [x] split-half stability plot
+- [x] stability-vs-K plot
 - [ ] matched vs mismatched vs blind condition score plots
-- [ ] AUROC-vs-K comparison plot
-- [ ] layerwise heatmap of performance
-- [ ] subspace-angle heatmap across layers
+- [x] AUROC-vs-K comparison plot
+- [x] layerwise heatmap / diagnostic plot of performance
+- [x] subspace-angle heatmap across layers
 - [ ] intervention pre-check figure / sanity output
 - [ ] intervention result bar chart
 - [ ] semantic token cluster figure
@@ -769,13 +873,14 @@ This stage is successful if:
 - [ ] optional caption sanity-check plot
 
 ### Essential tables
-- [ ] POPE baseline prediction table
-- [ ] feature family comparison table
-- [ ] best-layer summary table
+- [x] POPE baseline prediction table
+- [x] feature family comparison table
+- [x] best-layer summary table
 - [ ] K-selection table
 - [ ] intervention ablation/rescue table
 - [ ] semantic direction summary table
 - [ ] final claim-evidence table
+  - Running notes exist in `notes/findings.md`; `notes/claim_evidence_table.md` still needs final pass
 
 ---
 
@@ -784,11 +889,13 @@ This stage is successful if:
 Before writing any paper claim, check the boxes honestly.
 
 ### Claim 1: “A stable low-rank difference structure exists.”
-- [ ] supported by spectrum concentration
-- [ ] supported by effective rank
-- [ ] supported by split-half stability
+- [x] supported by spectrum concentration
+- [x] supported by effective rank
+- [x] supported by split-half stability
 - [ ] supported by shuffle controls
-- [ ] supported by coherent K-sensitivity behavior
+- [x] supported by coherent K-sensitivity behavior
+
+Current status: mostly supported, but still missing shuffle controls.
 
 ### Claim 2: “The structure is related to image-conditioned correction.”
 - [ ] supported by matched vs mismatched vs blind comparisons
@@ -796,18 +903,24 @@ Before writing any paper claim, check the boxes honestly.
 - [ ] not reducible to the mere presence of any image input
 
 ### Claim 3: “The structure carries hallucination-relevant information.”
-- [ ] projected features predict POPE hallucination risk
+- [x] projected features predict POPE hallucination risk
 - [ ] works across subsets
 - [ ] not reducible to trivial random low-dimensional projections
+
+Current status: partially supported. Stronger at K=128/256 than low K; random controls are nontrivial.
 
 ### Claim 4: “The structure is more compact than generic raw-state probing.”
 - [ ] low-K features preserve strong predictive performance
 - [ ] competitive with or better than raw hidden-state baselines
 - [ ] K selection is not cherry-picked
 
+Current status: not supported yet for FP-vs-TN. Do not claim compression advantage.
+
 ### Claim 5: “The structure evolves meaningfully across layers.”
-- [ ] supported by layerwise rank / stability / performance analysis
-- [ ] supported by inter-layer subspace angle analysis
+- [x] supported by layerwise rank / stability / performance analysis
+- [x] supported by inter-layer subspace angle analysis
+
+Current status: supported with an important caveat: rank/stability/performance are partly misaligned.
 
 ### Claim 6: “The structure has causal relevance.”
 - [ ] E0 engineering pre-check passed
@@ -833,24 +946,29 @@ Before writing any paper claim, check the boxes honestly.
 ## 15. Recommended Execution Order
 
 ### Week / Phase 1 — Infrastructure
-- [ ] make POPE evaluation pipeline fully reproducible
-- [ ] make hidden-state dump pipeline fully reproducible
+- [x] make POPE evaluation pipeline fully reproducible
+- [x] make hidden-state dump pipeline fully reproducible
 - [ ] run token-position pilot and freeze the primary readout position
-- [ ] verify sample-level alignment between predictions and activations
+- [x] verify sample-level alignment between predictions and activations
 
 ### Week / Phase 2 — Geometry existence
 - [ ] Stage A entirely
-- [ ] produce the dedicated K-sensitivity report
-- [ ] decide candidate layers and provisional K values
+  - Done: A1/A2/A3/A5
+  - Missing: A4 shuffle controls
+- [x] produce the dedicated K-sensitivity report
+- [x] decide candidate layers and provisional K values
+  - Candidate layers: L16/L20/L24/L28; L32 is weaker
+  - Candidate K depends on purpose: K=4 for dominant stable geometry; K=128/256 for prediction
 
 ### Week / Phase 3 — Relation to hallucination / correction
 - [ ] Stage B entirely
-- [ ] Stage C entirely
+- [x] Stage C feature/probe/deep analysis completed
 - [ ] finalize `K*`
+  - Deferred because Stage C shows variance/prediction mismatch
 
 ### Week / Phase 4 — Layer story
-- [ ] Stage D entirely
-- [ ] produce one clean layerwise summary figure
+- [x] Stage D entirely except exact principal-angle variant
+- [x] produce one clean layerwise summary figure
 
 ### Week / Phase 5 — Causal pre-check and pilot (`1–2 weeks depending on E0 outcome`)
 - [ ] Stage E0 first
@@ -870,12 +988,12 @@ Before writing any paper claim, check the boxes honestly.
 
 If time or compute becomes tight, prioritize this reduced plan:
 
-- [ ] Stage A2 spectrum analysis
-- [ ] Stage A3 split-half stability
-- [ ] Stage A5 dedicated K-sensitivity analysis
+- [x] Stage A2 spectrum analysis
+- [x] Stage A3 split-half stability
+- [x] Stage A5 dedicated K-sensitivity analysis
 - [ ] Stage B1 matched vs mismatched vs blind comparison
-- [ ] Stage C1 feature comparison vs raw hidden-state probes
-- [ ] Stage D1 layerwise summary
+- [x] Stage C1 feature comparison vs raw hidden-state probes
+- [x] Stage D1 layerwise summary
 - [ ] Stage E0 implementation pre-check
 - [ ] Stage E3 one ablation pilot at the best layer
 - [ ] Stage G1 one lightweight semantic token projection figure

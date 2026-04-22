@@ -31,6 +31,5 @@ def projection_similarity(basis_a: np.ndarray, basis_b: np.ndarray) -> float:
     k = min(a.shape[1], b.shape[1])
     if k == 0:
         return 0.0
-    pa = a[:, :k] @ a[:, :k].T
-    pb = b[:, :k] @ b[:, :k].T
-    return float(np.trace(pa @ pb) / k)
+    overlap = a[:, :k].T @ b[:, :k]
+    return float(np.sum(overlap * overlap) / k)
