@@ -30,6 +30,7 @@ from vgs.io import append_experiment_log, write_json, write_jsonl
 from vgs.llava_hf import extract_hidden_pair, generate_pope_answer, load_llava_hf, resolve_device
 from vgs.pope import classify_outcome, parse_yes_no
 from vgs.artifacts import read_jsonl, save_hidden_layer
+from vgs.stage_e import run_intervention_pilot, run_intervention_precheck
 
 
 def _finish(args: argparse.Namespace, stage: str, output_dir: str | Path, payload: dict[str, Any]) -> Path:
@@ -506,20 +507,64 @@ def intervention_precheck_main() -> None:
     add_layer_args(parser)
     parser.add_argument("--model-source", choices=["hf", "official"], default="hf")
     parser.add_argument("--model-path", default=None)
+    parser.add_argument("--predictions", default="outputs/predictions/pope_predictions.jsonl")
+    parser.add_argument("--max-samples", type=int, default=1)
+    parser.add_argument("--max-new-tokens", type=int, default=8)
+    parser.add_argument("--random-scale", type=float, default=5.0)
+    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
+    parser.add_argument("--torch-dtype", default=None, choices=["float16", "bfloat16", "float32"])
+    parser.add_argument("--allow-cpu", action="store_true")
     parser.add_argument("--readout-position", default="last_prompt_token")
     parser.add_argument("--output-dir", default="outputs/interventions")
     args = parser.parse_args()
+    config = load_config(args.config)
+    model_path = args.model_path or config_get(config, "model.checkpoint_path")
+    torch_dtype = args.torch_dtype or config_get(config, "model.torch_dtype", "float16")
+    layers = resolve_layers(args)
+    payload = {
+        "layers": layers,
+        "model_source": args.model_source,
+        "model_path": model_path,
+        "predictions": args.predictions,
+        "max_samples": args.max_samples,
+        "max_new_tokens": args.max_new_tokens,
+        "random_scale": args.random_scale,
+        "device": args.device,
+        "torch_dtype": torch_dtype,
+        "readout_position": args.readout_position,
+    }
+    if not args.dry_run:
+        if args.model_source != "hf":
+            raise NotImplementedError("Only the Hugging Face LLaVA path is implemented for Stage E.")
+        resolved_device = resolve_device(args.device, allow_cpu=args.allow_cpu)
+        model, processor, resolved_device = load_llava_hf(
+            model_path,
+            device=resolved_device,
+            torch_dtype=torch_dtype,
+            allow_cpu=args.allow_cpu,
+        )
+        rows = read_jsonl(args.predictions)
+        if args.max_samples is not None:
+            rows = rows[: args.max_samples]
+        payload.update({"resolved_device": resolved_device})
+        payload.update(
+            run_intervention_precheck(
+                model,
+                processor,
+                rows,
+                layers,
+                resolved_device,
+                args.output_dir,
+                args.seed,
+                args.max_new_tokens,
+                args.random_scale,
+            )
+        )
     _finish(
         args,
         "intervention_precheck",
         args.output_dir,
-        {
-            "layers": resolve_layers(args),
-            "model_source": args.model_source,
-            "model_path": args.model_path,
-            "readout_position": args.readout_position,
-            "todo": "Document module names, no-op hook equality, and random perturbation effect.",
-        },
+        payload,
     )
 
 
@@ -527,22 +572,84 @@ def intervention_pilot_main() -> None:
     parser = argparse.ArgumentParser(description="Run causal ablation/rescue intervention pilot.")
     add_common_args(parser)
     add_layer_args(parser)
-    parser.add_argument("--k", type=int, required=True)
+    parser.set_defaults(layers=["24"])
+    parser.add_argument("--model-source", choices=["hf", "official"], default="hf")
+    parser.add_argument("--model-path", default=None)
+    parser.add_argument("--max-samples-per-outcome", type=int, default=16)
+    parser.add_argument("--max-new-tokens", type=int, default=8)
+    parser.add_argument("--alpha-grid", nargs="*", default=["4.0", "5.0", "6.0", "7.0", "8.0"])
+    parser.add_argument("--tail-band", default="257-1024")
+    parser.add_argument("--outcomes", nargs="*", default=["TN", "FP"])
+    parser.add_argument("--families", nargs="*", default=["tail", "rescue"], choices=["tail", "rescue"])
+    parser.add_argument("--granularities", nargs="*", default=["last_token"], choices=["last_token", "full_sequence", "generated_token"])
+    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
+    parser.add_argument("--torch-dtype", default=None, choices=["float16", "bfloat16", "float32"])
+    parser.add_argument("--allow-cpu", action="store_true")
     parser.add_argument("--svd-dir", default="outputs/svd")
+    parser.add_argument("--hidden-states-dir", default="outputs/hidden_states")
     parser.add_argument("--predictions", default="outputs/predictions/pope_predictions.jsonl")
     parser.add_argument("--output-dir", default="outputs/interventions")
     args = parser.parse_args()
+    config = load_config(args.config)
+    model_path = args.model_path or config_get(config, "model.checkpoint_path")
+    torch_dtype = args.torch_dtype or config_get(config, "model.torch_dtype", "float16")
+    layers = resolve_layers(args)
+    tail_start, tail_end = [int(item) for item in args.tail_band.split("-", 1)]
+    alpha_grid = [float(item) for value in args.alpha_grid for item in value.split(",") if item]
+    payload = {
+        "layers": layers,
+        "model_source": args.model_source,
+        "model_path": model_path,
+        "max_samples_per_outcome": args.max_samples_per_outcome,
+        "max_new_tokens": args.max_new_tokens,
+        "alpha_grid": alpha_grid,
+        "tail_band": args.tail_band,
+        "outcomes": args.outcomes,
+        "families": args.families,
+        "granularities": args.granularities,
+        "svd_dir": args.svd_dir,
+        "hidden_states_dir": args.hidden_states_dir,
+        "predictions": args.predictions,
+        "device": args.device,
+        "torch_dtype": torch_dtype,
+    }
+    if not args.dry_run:
+        if args.model_source != "hf":
+            raise NotImplementedError("Only the Hugging Face LLaVA path is implemented for Stage E.")
+        resolved_device = resolve_device(args.device, allow_cpu=args.allow_cpu)
+        model, processor, resolved_device = load_llava_hf(
+            model_path,
+            device=resolved_device,
+            torch_dtype=torch_dtype,
+            allow_cpu=args.allow_cpu,
+        )
+        rows = read_jsonl(args.predictions)
+        payload.update({"resolved_device": resolved_device})
+        payload.update(
+            run_intervention_pilot(
+                model,
+                processor,
+                rows,
+                layers,
+                resolved_device,
+                args.output_dir,
+                args.svd_dir,
+                args.hidden_states_dir,
+                args.seed,
+                args.max_new_tokens,
+                args.max_samples_per_outcome,
+                alpha_grid,
+                (tail_start, tail_end),
+                args.outcomes,
+                args.families,
+                args.granularities,
+            )
+        )
     _finish(
         args,
         "intervention_pilot",
         args.output_dir,
-        {
-            "layers": resolve_layers(args),
-            "k": args.k,
-            "svd_dir": args.svd_dir,
-            "predictions": args.predictions,
-            "todo": "Apply ablation/rescue hooks and compare generation/logit changes.",
-        },
+        payload,
     )
 
 

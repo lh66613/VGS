@@ -14,7 +14,10 @@ def parse_yes_no(text: str) -> str:
     normalized = text.strip().lower()
     if not normalized:
         return "unknown"
-    first = normalized.replace(".", " ").replace(",", " ").split()[0]
+    tokens = normalized.replace(".", " ").replace(",", " ").split()
+    if not tokens:
+        return "unknown"
+    first = tokens[0]
     if first in YES_TOKENS:
         return "yes"
     if first in NO_TOKENS:

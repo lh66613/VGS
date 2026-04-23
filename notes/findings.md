@@ -345,3 +345,315 @@ Current interpretation:
 - The evidence-relevant signal is stronger in residual/tail and supervised decision views than in raw top-backbone energy.
 - TN samples show stronger matched-evidence residual/tail correction, while FP samples show weaker matched-specific residual/tail correction and a strong abnormal shift along the FP decision direction.
 - A careful wording is now justified: hallucination is associated not merely with the presence of image-conditioned change, but with distorted condition-specific correction geometry under matched visual evidence.
+
+## 2026-04-23 Stage E Causal Intervention Preparation
+
+Prepared scripts:
+
+- E0 hook precheck: `scripts/intervention_precheck.py`
+- Intervention pilot: `scripts/intervention_pilot.py`
+- Convenience wrapper: `scripts/run_gpu_stage_e.sh`
+- Core implementation: `src/vgs/stage_e.py`
+
+Rationale:
+
+- Stage A/C/B now support structure existence, discriminative mismatch, and condition sensitivity.
+- The key missing evidence is causal: whether removing or steering the relevant coordinates changes model answers.
+- Because top-K directions are not the main discriminative object, Stage E should not start with deleting top-4 directions.
+
+Initial intervention families:
+
+- **TN ablation**: on originally correct TN samples, ablate the residual/tail SVD slice `257-1024`; compare to a random same-width tail control.
+- **FP decision steering**: on originally hallucinated FP samples, move the matched-image hidden state to reduce the logistic / LDA FP decision score.
+- **Correction steering**: on FP samples, add a TN-like mean correction direction or counteract the FP-like mean shift.
+
+Default pilot:
+
+- Layer: L24 first
+- Granularity: last prompt token during the initial full-prompt forward
+- Alpha grid: `0.25 / 0.5 / 1.0`
+- Samples: 16 FP and 16 TN by default
+- Output files after GPU run:
+  - `outputs/interventions/intervention_precheck.csv`
+  - `outputs/interventions/intervention_pilot_results.csv`
+  - `outputs/interventions/intervention_pilot_summary.csv`
+
+Status:
+
+- CLI dry-runs pass.
+- Actual E0/E-pilot still require a CUDA run.
+- Causal claims remain unvalidated until the hook precheck and pilot results succeed.
+
+## 2026-04-23 Stage E First Pilot Result
+
+Artifacts:
+
+- Precheck: `outputs/interventions/intervention_precheck.csv`
+- Pilot results: `outputs/interventions/intervention_pilot_results.csv`
+- Pilot summary: `outputs/interventions/intervention_pilot_summary.csv`
+
+Setup:
+
+- Layer: L24
+- Samples: 16 TN and 16 FP
+- Alpha grid: `0.25 / 0.5 / 1.0`
+- Tail band: `257-1024`
+- Intervention granularity: last prompt token only
+
+Precheck:
+
+- No-op hook preserved generated text: baseline `Yes`, no-op `Yes`.
+- Random perturbation with the first implementation did not change generated text: random perturbation also `Yes`.
+- This does not prove the hook has no effect, because the check only measured final decoded text; the next precheck should inspect next-token logits directly.
+
+Pilot outcome:
+
+- TN baseline accuracy: 1.0; tail ablation at all tested alphas kept accuracy at 1.0 and FP rate at 0.0.
+- Random tail control also kept TN accuracy at 1.0.
+- FP baseline accuracy: 0.0 and FP rate: 1.0.
+- Logistic/LDA decision steering, TN-correction steering, and FP-shift counter-steering all kept FP accuracy at 0.0 and FP rate at 1.0 for alpha up to 1.0.
+
+Interpretation:
+
+- First Stage E pilot is a null result at the decoded-answer level.
+- It should not yet be interpreted as evidence against causality, because the intervention may be too weak, last-token-only may be insufficient, or the generation argmax may be insensitive.
+- Stage E tooling has been updated so the precheck records next-token logit deltas, not only decoded text changes.
+- Next pilot should use stronger alpha values, e.g. `1 / 2 / 4 / 8`, and decide whether to add full-sequence or answer-step hooks if logits remain insensitive.
+
+## 2026-04-23 Stage E Stronger-Alpha Pilot Result
+
+Artifacts:
+
+- Precheck: `outputs/interventions/intervention_precheck.csv`
+- Pilot results: `outputs/interventions/intervention_pilot_results.csv`
+- Pilot summary: `outputs/interventions/intervention_pilot_summary.csv`
+
+Setup:
+
+- Layer: L24
+- Samples: 16 TN and 16 FP
+- Alpha grid: `1 / 2 / 4 / 8`
+- Tail band: `257-1024`
+- Intervention granularity: last prompt token only
+
+Precheck:
+
+- No-op hook preserved generated text and logits exactly: max logit delta `0.0`.
+- Random perturbation changed logits but not decoded text: max logit delta `0.1641`.
+- The yes-vs-no next-token margin barely changed: baseline margin `1.3594`, random margin `1.3750`.
+- Interpretation: the hook is active, but final yes/no output can be insensitive to small last-token perturbations.
+
+TN ablation:
+
+- Baseline TN accuracy: `1.0`.
+- Tail ablation `257-1024`:
+  - alpha 1 / 2 / 4: TN accuracy remains `1.0`
+  - alpha 8: TN accuracy drops to `0.0`, with 16 / 16 samples flipping to FP (`Yes`)
+- Random same-width tail control:
+  - alpha 1 / 2: TN accuracy remains `1.0`
+  - alpha 4 / 8: outputs become `unknown` for 16 / 16 samples
+
+FP steering:
+
+- Baseline FP accuracy: `0.0`, FP rate `1.0`.
+- Logistic FP-score reduction, LDA FP-score reduction, TN-correction steering, and FP-shift counter-steering all leave FP rate at `1.0` through alpha 8.
+- The generated answer remains `Yes` for every FP sample and intervention in this pilot.
+
+Interpretation:
+
+- This is the first causal-looking signal: sufficiently strong ablation of the residual/tail slice can destroy correct TN behavior and flip it to hallucinated `Yes`.
+- However, it is not yet a clean causal claim because the random control becomes invalid/unknown at high alpha rather than preserving normal answer format.
+- FP rescue is not supported by the current last-token steering setup.
+- Next Stage E should record yes/no logits for every pilot intervention and run a finer tail-ablation dose curve around alpha 4-8, ideally with a better norm-matched control and possibly L20/L32 replication.
+
+Updated Stage E plan:
+
+- The intervention pilot now records yes/no logits and yes-minus-no margin for every intervention row.
+- The summary now records mean and median yes-minus-no margin, unknown rate, and mean margin shift relative to each sample's baseline.
+- Added cleaner tail controls:
+  - random same-width projection
+  - random same-width projection orthogonalized against the `257-1024` tail slice
+  - norm-matched orthogonal random projection, scaled per sample to match the target tail projection norm
+- Added intervention granularities:
+  - `last_token`
+  - `full_sequence`
+  - `generated_token`
+- Recommended next run:
+
+```bash
+LAYERS="20 24" OUTCOMES="TN" FAMILIES="tail" GRANULARITIES="last_token" \
+  ALPHA_GRID="4 5 6 7 8" bash scripts/run_gpu_stage_e.sh
+```
+
+- Recommended granularity pilot:
+
+```bash
+LAYERS="24" OUTCOMES="TN" FAMILIES="tail" GRANULARITIES="last_token full_sequence" \
+  MAX_SAMPLES_PER_OUTCOME=4 ALPHA_GRID="4 6 8" bash scripts/run_gpu_stage_e.sh
+```
+
+## 2026-04-23 Stage E Clean Tail Dose Analysis
+
+Artifacts:
+
+- Pilot results: `outputs/interventions/intervention_pilot_results.csv`
+- Pilot summary: `outputs/interventions/intervention_pilot_summary.csv`
+- Post-hoc dose analysis: `outputs/interventions/stage_e_dose_curve.csv`
+- Flip thresholds: `outputs/interventions/stage_e_flip_thresholds.csv`
+- Flip threshold summary: `outputs/interventions/stage_e_flip_threshold_summary.csv`
+- Plots:
+  - `outputs/plots/stage_e_tail_ablation_dose.png`
+  - `outputs/plots/stage_e_control_unknown_rate.png`
+
+Setup:
+
+- Layers: L20 and L24
+- Outcome: TN only
+- Family: tail ablation and controls only
+- Tail band: `257-1024`
+- Granularity: last prompt token
+- Alpha grid: `4 / 5 / 6 / 7 / 8`
+- Samples: 16 TN per layer
+
+Main result:
+
+- Tail ablation produces a clear dose-dependent movement from correct `No` toward hallucinated `Yes`.
+- L24 is cleaner than L20 in this run: it flips all 16 / 16 TN samples to `Yes` at alpha 8 with no unknown outputs.
+- L20 also shows a strong effect, but alpha 8 starts to induce format collapse: 9 / 16 `Yes`, 2 / 16 `No`, and 5 / 16 `unknown`.
+
+Tail ablation dose curve:
+
+| Layer | alpha 4 | alpha 5 | alpha 6 | alpha 7 | alpha 8 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| L20 Yes rate | 0.0625 | 0.3750 | 0.7500 | 0.8750 | 0.5625 |
+| L20 median yes-no margin | -0.5703 | -0.0938 | 0.2812 | 0.6289 | 1.6484 |
+| L24 Yes rate | 0.0000 | 0.1250 | 0.5625 | 0.9375 | 1.0000 |
+| L24 median yes-no margin | -0.7500 | -0.3281 | 0.0156 | 0.3906 | 0.9336 |
+
+Flip thresholds:
+
+- L20: 15 / 16 samples eventually flip to `Yes`; median first-Yes alpha is 6.0. First-Yes counts are alpha 4: 1, alpha 5: 5, alpha 6: 6, alpha 7: 3.
+- L24: 16 / 16 samples eventually flip to `Yes`; median first-Yes alpha is 6.0. First-Yes counts are alpha 5: 2, alpha 6: 7, alpha 7: 6, alpha 8: 1.
+
+Controls:
+
+- Random same-width and orthogonal same-width controls mostly collapse answer format to `unknown`, so they are poor high-alpha controls.
+- Norm-matched orthogonal random control is more informative:
+  - L24 stays `No` for 16 / 16 samples through alpha 6, while true tail ablation already flips 9 / 16 at alpha 6.
+  - L24 norm-matched control starts producing many unknowns at alpha 7/8 but still produces 0 `Yes` among all samples.
+  - L20 norm-matched control is less clean: it produces 2 / 16 `Yes` at alpha 5 and many unknowns at alpha 6+.
+
+Interpretation:
+
+- This is stronger causal evidence than the previous alpha-8-only observation, because the yes/no margin changes continuously and the answer flips occur around alpha 5-7 rather than only at an extreme endpoint.
+- The cleanest current causal-looking claim is layer-specific: removing the L24 `257-1024` residual/tail slice at the matched-image last-token state degrades originally correct TN answers in a dose-dependent way.
+- The result still should be called "causal relevance" rather than a fully isolated mechanism, because high-alpha control stability remains imperfect and the intervention is last-token-only.
+
+Next Stage E step:
+
+- Run a small granularity pilot on L24 comparing `last_token` vs `full_sequence`, using TN tail ablation first.
+- Then run FP rescue as a logit-margin experiment, not as an answer-flip experiment, with `full_sequence` and/or `generated_token` included.
+
+## 2026-04-23 Stage E Granularity Pilot
+
+Artifacts:
+
+- Pilot results: `outputs/interventions/intervention_pilot_results.csv`
+- Pilot summary: `outputs/interventions/intervention_pilot_summary.csv`
+- Post-hoc dose analysis: `outputs/interventions/stage_e_dose_curve.csv`
+- Flip threshold summary: `outputs/interventions/stage_e_flip_threshold_summary.csv`
+
+Setup:
+
+- Layer: L24
+- Outcome: TN only
+- Family: tail ablation and controls only
+- Tail band: `257-1024`
+- Granularities: `last_token` and `full_sequence`
+- Alpha grid: `4 / 6 / 8`
+- Samples: 4 TN
+
+Tail ablation result:
+
+| Granularity | alpha 4 Yes rate | alpha 6 Yes rate | alpha 8 Yes rate | alpha 8 median yes-no margin |
+| --- | ---: | ---: | ---: | ---: |
+| last_token | 0.00 | 0.75 | 1.00 | 0.9414 |
+| full_sequence | 0.00 | 1.00 | 1.00 | 4.7402 |
+
+Flip thresholds:
+
+- `full_sequence`: 4 / 4 samples first flip to `Yes` at alpha 6.
+- `last_token`: 3 / 4 samples first flip at alpha 6 and 1 / 4 first flips at alpha 8.
+
+Controls and caveats:
+
+- `full_sequence` true tail ablation is stronger than last-token ablation at the yes/no margin level.
+- However, full-sequence interventions often corrupt the continuation after the first answer token; e.g. outputs start with `Yes` but then continue with nonsensical token strings.
+- Full-sequence random / orthogonal controls mostly become `unknown`, so this pilot does not yet provide a clean full-sequence directional-control result.
+- Last-token remains the cleaner protocol for the current causal-ablation claim, while full-sequence is promising for a first-token / logit-only follow-up.
+
+Next recommended run:
+
+```bash
+LAYERS="24" OUTCOMES="TN" FAMILIES="tail" GRANULARITIES="last_token full_sequence" \
+  MAX_SAMPLES_PER_OUTCOME=8 MAX_NEW_TOKENS=1 ALPHA_GRID="4 5 6" bash scripts/run_gpu_stage_e.sh
+```
+
+Rationale:
+
+- `MAX_NEW_TOKENS=1` should isolate the first yes/no decision and avoid interpreting post-answer format collapse as part of the causal effect.
+- Alpha `4 / 5 / 6` is the most informative range because alpha 8 is already saturated for both granularities.
+
+## 2026-04-23 Stage E First-Token Granularity Pilot
+
+Artifacts:
+
+- Pilot results: `outputs/interventions/intervention_pilot_results.csv`
+- Pilot summary: `outputs/interventions/intervention_pilot_summary.csv`
+- Tagged post-hoc dose analysis: `outputs/interventions/stage_e_first_token_dose_curve.csv`
+- Tagged flip thresholds: `outputs/interventions/stage_e_first_token_flip_thresholds.csv`
+- Tagged flip threshold summary: `outputs/interventions/stage_e_first_token_flip_threshold_summary.csv`
+- Plots:
+  - `outputs/plots/stage_e_first_token_tail_ablation_dose.png`
+  - `outputs/plots/stage_e_first_token_control_unknown_rate.png`
+
+Setup:
+
+- Layer: L24
+- Outcome: TN only
+- Family: tail ablation and controls only
+- Tail band: `257-1024`
+- Granularities: `last_token` and `full_sequence`
+- Alpha grid: `4 / 5 / 6`
+- Samples: 8 TN
+- Generation: `max_new_tokens=1`
+
+Tail ablation result:
+
+| Granularity | alpha 4 Yes rate | alpha 5 Yes rate | alpha 6 Yes rate | alpha 6 median yes-no margin |
+| --- | ---: | ---: | ---: | ---: |
+| last_token | 0.00 | 0.25 | 0.625 | 0.0391 |
+| full_sequence | 0.00 | 0.50 | 1.00 | 2.3203 |
+
+Flip thresholds:
+
+- `full_sequence`: 8 / 8 samples eventually flip to `Yes`; first-Yes alpha is between 5 and 6, with median 5.5.
+- `last_token`: 5 / 8 samples flip to `Yes` by alpha 6; 3 / 8 remain `No` through alpha 6.
+
+Controls:
+
+- The best control remains norm-matched random tail at `last_token`: it stays `No` for 8 / 8 samples at alpha 4 / 5 / 6, with no unknowns.
+- Norm-matched random tail at `full_sequence` never produces `Yes`, but its unknown rate rises from 0.375 to 0.875 as alpha grows from 4 to 6.
+- Random same-width and orthogonal controls mostly produce `unknown` for both granularities, so they remain format-stability controls rather than good directional controls.
+
+Interpretation:
+
+- The stronger full-sequence effect survives the `max_new_tokens=1` test, so it is not merely a post-answer continuation artifact.
+- Full-sequence tail ablation appears to affect the actual first yes/no decision more strongly than last-token-only ablation.
+- However, full-sequence controls are still unstable, so the cleanest directional-control evidence remains the last-token comparison against norm-matched random tail.
+- A conservative claim is now: L24 residual/tail correction coordinates have causal relevance for the first yes/no decision, and the effect is stronger when the intervention is distributed across the full prompt sequence.
+
+Next Stage E step:
+
+- Use `max_new_tokens=1` for FP rescue / steering and judge success by yes-no margin movement first.
+- Run a small FP-only rescue pilot with `last_token full_sequence generated_token`, because answer flips are likely too strict but first-token margins may reveal partial steering.

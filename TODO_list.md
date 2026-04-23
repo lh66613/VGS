@@ -139,7 +139,7 @@ By the end of this TODO list, the project should produce:
 - [x] one supervised-vs-SVD subspace alignment report
 - [x] one full-space coordinate-control sanity check
 - [x] one layerwise geometry report
-- [ ] one causal intervention pilot result
+- [x] one causal intervention pilot result
 - [ ] one semantic interpretation report for singular directions
 - [ ] one optional caption sanity-check report
 - [x] one running summary document answering: “What has actually been validated?”
@@ -182,6 +182,7 @@ project/
 │   ├── layerwise_analysis.py
 │   ├── intervention_precheck.py
 │   ├── intervention_pilot.py
+│   ├── analyze_stage_e_results.py
 │   ├── semantic_interpretation.py
 │   ├── chair_sanity_check.py
 │   ├── validate_pope_data.py
@@ -196,7 +197,8 @@ project/
 │   ├── run_cpu_stage_a.sh
 │   ├── run_cpu_stage_c_d.sh
 │   ├── run_gpu_stage_b_conditions.sh
-│   └── run_cpu_stage_b.sh
+│   ├── run_cpu_stage_b.sh
+│   └── run_gpu_stage_e.sh
 └── notes/
     ├── experiment_log.md
     ├── findings.md
@@ -734,26 +736,68 @@ Still avoid causal wording until Stage E.
 
 > Note: this is the most important stage for “mechanism” claims, but it is also the riskiest technically. Do not enter the formal intervention stage before an engineering pre-check succeeds.
 
+Stage E should reflect the Stage B/C result: do **not** prioritize deleting top-4 directions. The first causal tests should target:
+
+- residual / tail correction slices, especially `257-1024`
+- supervised decision-aligned directions, especially logistic and LDA/Fisher FP-vs-TN directions
+- TN-like correction vs FP-like decision shift directions separately
+
+Prepared implementation:
+
+- [x] Implement hook-based Stage E helpers: `src/vgs/stage_e.py`
+- [x] Replace placeholder `scripts/intervention_precheck.py` with real E0 precheck path
+- [x] Replace placeholder `scripts/intervention_pilot.py` with real pilot path
+- [x] Add wrapper: `scripts/run_gpu_stage_e.sh`
+- [x] Dry-run E0 and pilot CLIs without loading the model
+- [x] Add post-hoc Stage E analysis script: `scripts/analyze_stage_e_results.py`
+- [x] Expose `MAX_NEW_TOKENS` in `scripts/run_gpu_stage_e.sh` so first-token intervention pilots can be run cleanly
+
+Default pilot:
+
+- [x] Start with L24 as the first target layer
+- [x] Use `tail_band=257-1024`
+- [x] First run used `alpha in {0.25, 0.5, 1.0}`
+- [x] Next default uses stronger `alpha in {1.0, 2.0, 4.0, 8.0}`
+- [x] Clean tail dose curve uses `alpha in {4.0, 5.0, 6.0, 7.0, 8.0}`
+- [x] Use `max_samples_per_outcome=16` by default
+- [x] TN samples: tail-slice ablation plus random-tail control
+- [x] FP samples: supervised-direction reduction plus TN-correction / FP-shift steering
+- [x] Add pilot yes/no logit recording for future runs
+- [x] Add cleaner controls:
+  - [x] random same-width tail control
+  - [x] orthogonal random same-width control
+  - [x] norm-matched orthogonal random control
+- [x] Add intervention granularity options:
+  - [x] `last_token`
+  - [x] `full_sequence`
+  - [x] `generated_token`
+- [x] Add outcome/family filters so clean TN tail dose curves can run without FP rescue
+
 ## E0. Implementation pre-check
 
 ### Goal
 Verify that activation intervention is technically feasible and reproducible in the chosen `LLaVA-1.5-7B` codebase.
 
 ### Task
-- [ ] Freeze one codebase only (`official` or `HF`) and do not switch midway
-- [ ] Inspect the forward path and document:
-  - [ ] where image embeddings are inserted / fused with text
-  - [ ] the exact module names for transformer blocks
-  - [ ] whether `output_hidden_states=True` gives the needed tensors directly
+- [x] Freeze one codebase only (`official` or `HF`) and do not switch midway
+  - Current Stage E path uses HuggingFace `LlavaForConditionalGeneration`
+- [x] Inspect the forward path and document:
+  - [x] where image embeddings are inserted / fused with text
+  - [x] the exact module names for transformer blocks
+    - HF hook path: `model.language_model.model.layers[layer-1]`
+  - [x] whether `output_hidden_states=True` gives the needed tensors directly
   - [ ] whether full-sequence hidden states can be intercepted and modified cleanly
-- [ ] Decide one main intervention mechanism:
-  - [ ] preferred: `register_forward_hook` / forward hook on target transformer block output
+- [x] Decide one main intervention mechanism:
+  - [x] preferred: `register_forward_hook` / forward hook on target transformer block output
   - [ ] backup: manual forward split / wrapper module if hook semantics are unreliable
 - [ ] Verify that the intervention can modify:
-  - [ ] last-token hidden state only
+  - [x] last-token hidden state only
   - [ ] full-sequence hidden states
-- [ ] Run a no-op hook to confirm output equality before and after adding the hook
-- [ ] Run a tiny random-direction intervention to confirm the logits change in the expected place
+- [x] Run a no-op hook to confirm output equality before and after adding the hook
+  - First run: baseline `Yes`, no-op `Yes`
+- [x] Run a tiny random-direction intervention to confirm the logits change in the expected place
+  - First run checked decoded text only; random perturbation did not change text
+  - Second run: random perturbation changed logits with max delta `0.1641`, but did not change decoded text
 
 ### Implementation notes to document
 - [ ] whether image tokens are prepended / inserted before the LM blocks in this implementation
@@ -762,9 +806,10 @@ Verify that activation intervention is technically feasible and reproducible in 
 
 ### Exit condition
 Proceed to E1 only if:
-- [ ] the intervention path is stable
-- [ ] no-op hook preserves outputs exactly or near-exactly
-- [ ] random-direction perturbation creates controlled, measurable output changes
+- [x] the intervention path is stable
+- [x] no-op hook preserves outputs exactly or near-exactly
+- [x] random-direction perturbation creates controlled, measurable output changes
+  - Caveat: movement is visible in logits but small relative to yes/no margin
 
 If E0 fails:
 - [ ] downgrade Stage E to a smaller pilot or skip rescue first
@@ -775,85 +820,143 @@ If E0 fails:
 ## E1. Choose one or two target layers
 
 ### Task
-- [ ] Select layers based on earlier evidence:
-  - [ ] strongest stability
-  - [ ] strongest spectral concentration
-  - [ ] strongest predictive power
+- [x] Select layers based on earlier evidence:
+  - [x] strongest stability
+  - [x] strongest spectral concentration
+  - [x] strongest predictive power
   - [ ] engineering feasibility from E0
 
 ### Output
-- [ ] one short note explaining why the chosen layer(s) were selected
+- [x] one short note explaining why the chosen layer(s) were selected
+  - Start at L24 for the first causal pilot because Stage C full-difference/SVD-coordinate probes are strong there and Stage B supervised decision gaps are largest or near-largest at L24; keep L20/L32 as follow-up layers
 
 ---
 
 ## E2. Decide intervention granularity
 
 ### Task
-- [ ] Compare two intervention granularities on a very small pilot:
-  - [ ] last-token-only intervention
-  - [ ] full-sequence intervention
-- [ ] Keep the stronger / more stable one as the main Stage E setting
+- [x] Compare two intervention granularities on a very small pilot:
+  - [x] last-token-only intervention
+    - First pilot produced no decoded-answer changes
+    - Clean dose run later showed a stable L24 TN tail-ablation effect
+  - [x] full-sequence intervention
+    - Pilot completed on L24 TN samples with alpha 4/6/8
+    - Full-sequence tail ablation is stronger than last-token at the yes/no margin level, but corrupts continuations and controls more often
+    - First-token follow-up with `max_new_tokens=1` confirms the full-sequence effect is on the first yes/no decision, not only on post-answer continuation
+- [x] Keep the stronger / more stable one as the main Stage E setting
+  - Current choice: last-token remains the main clean causal-ablation protocol; full-sequence is reserved for first-token / logit-only follow-up
 
 ### Success criterion
-- [ ] main intervention mode is chosen by measured effect and reproducibility, not by convenience
+- [x] main intervention mode is chosen by measured effect and reproducibility, not by convenience
 
 ---
 
-## E3. Ablation along `V_K`
+## E3. Ablation of residual / tail correction slices
 
 ### Task
-For samples that are originally correct, modify the hidden state at layer `l*`:
+For TN samples that are originally correct, modify the matched-image hidden state at layer `l*`:
 
 \[
-z' = z - P_{V_K} z
+z' = z - \alpha P_{V_{257:1024}} z
 \]
 
-or the full-sequence analogue if full-sequence intervention is adopted.
+Do not make top-4 deletion the primary intervention. Treat top-direction ablation as a later control if needed.
+
+Next clean dose curve:
+
+- [x] Run alpha `4 / 5 / 6 / 7 / 8`
+- [x] Record decoded answer plus yes/no logits and margin
+- [x] Run on L24 and replicate on L20
+- [ ] Optionally run L32 after L20/L24
 
 ### What to measure
-- [ ] change in yes/no prediction
-- [ ] drop in accuracy / F1
-- [ ] rise in hallucination rate / FP rate
+- [x] change in yes/no prediction
+  - First pilot: no prediction flips; stronger pilot: L24 tail ablation at alpha 8 flips 16/16 TN to FP
+  - Clean dose run: L24 flips 0/16, 2/16, 9/16, 15/16, 16/16 at alpha 4/5/6/7/8; L20 flips 1/16, 6/16, 12/16, 14/16, 9/16 with 5 unknowns at alpha 8
+- [x] drop in accuracy / F1
+  - First pilot: TN accuracy stayed 1.0; L24 clean dose accuracy over valid samples drops to 0.0 at alpha 8
+- [x] rise in hallucination rate / FP rate
+  - L24 clean dose Yes rate rises monotonically from 0.0 to 1.0 as alpha increases from 4 to 8
+- [x] margin dose curve
+  - L24 median yes-minus-no margin moves from -0.7500 at alpha 4 to 0.9336 at alpha 8
+  - L20 median yes-minus-no margin moves from -0.5703 at alpha 4 to 1.6484 at alpha 8, with format collapse at alpha 8
+- [x] granularity comparison
+  - L24 full-sequence tail ablation flips 4/4 TN samples at alpha 6, versus 3/4 for last-token
+  - Full-sequence alpha 8 median yes-minus-no margin is 4.7402, versus 0.9414 for last-token
+- [x] first-token granularity comparison
+  - With `max_new_tokens=1`, L24 full-sequence tail ablation flips 8/8 TN samples by alpha 6, versus 5/8 for last-token
+  - Full-sequence alpha 6 median yes-minus-no margin is 2.3203, versus 0.0391 for last-token
 
 ### Controls
-- [ ] ablate random same-dimensional subspace
+- [x] ablate random same-dimensional subspace
+  - Caveat: random control becomes invalid/unknown at high alpha 4/8, so the alpha-8 tail effect is not yet a clean directional-control win
+- [x] add orthogonal random same-width control
+- [x] add norm-matched orthogonal random same-width control
+  - L24 norm-matched control stays `No` for 16/16 samples through alpha 6 while true tail ablation flips 9/16 at alpha 6
+  - Caveat: norm-matched control still develops many unknowns at L24 alpha 7/8 and at L20 alpha 6+
+  - Granularity caveat: full-sequence controls mostly collapse to unknown, so full-sequence should be evaluated next with `MAX_NEW_TOKENS=1`
+  - First-token follow-up: norm-matched last-token control stays `No` for 8/8 samples through alpha 6, while last-token true tail ablation flips 5/8 and full-sequence true tail ablation flips 8/8
 - [ ] ablate orthogonal complement slice of matched energy
 - [ ] ablate at a weaker layer
 
 ### Success criterion
 This stage supports the hypothesis if:
-- [ ] ablating `V_K` harms grounded answering significantly more than control ablations
+- [x] ablating residual / tail correction slices harms grounded answering significantly more than control ablations
+  - Supported most cleanly at L24 alpha 6: true tail ablation flips 9/16 TN to FP, while norm-matched control remains 16/16 `No`
+  - Still caveated at high alpha because most random/orthogonal controls collapse to unknown output format
 
 ---
 
-## E4. Rescue / steering along `V_K`
+## E4. Rescue / steering along supervised and correction directions
 
 ### Task
-For samples that are originally hallucinated, try adding a direction aligned with truthful / grounded correction:
+For FP samples that are originally hallucinated, try three targeted steering families:
+
+- reduce FP decision score by moving opposite the matched FP-vs-TN decision direction in `d = z_blind - z_img`
+- add TN-like correction direction
+- subtract / counteract FP-like average shift
 
 \[
-z' = z + \alpha \cdot P_{V_K}(r)
+z' = z + \alpha w_{\text{decision}}
 \]
+
+Next rescue criterion should be logit-level before decoded-answer-level:
+
+- [ ] Check whether `logit(No) - logit(Yes)` increases under rescue directions
+- [ ] Compare margin movement against random steering controls
+- [ ] Only treat decoded flips as a later, stronger success condition
 
 ### Primary definition of `r`
 Use a concrete default instead of a vague class average:
-- [ ] define `r` as the mean correction direction from a truthful reference group
-- [ ] primary choice: mean of `d_i = z_blind - z_img` over **TN samples**
+- [x] define `r` as the mean correction direction from a truthful reference group
+- [x] primary choice: mean of `d_i = z_blind - z_img` over **TN samples**
 - [ ] secondary choice: mean over all correct samples in a matched subset
 - [ ] always project `r` into `V_K` before injection
+  - Current implementation uses unit mean direction first; add projected variant if pilot results are promising
 
 ### What to measure
-- [ ] recovery in yes/no correctness
-- [ ] reduction in FP rate
+- [x] recovery in yes/no correctness
+  - First and second pilots: no FP recovery
+- [x] reduction in FP rate
+  - First and second pilots: FP rate stayed 1.0
 - [ ] whether rescue helps more than random-direction injection
+  - Add explicit random steering control if stronger-alpha pilot shows movement
+
+Direction upgrade:
+
+- [ ] Replace global TN mean with more local directions if global steering remains weak:
+  - [ ] same-question / same-object cluster TN-like direction
+  - [ ] matched-minus-random local correction template
+  - [ ] layer-specific and outcome-specific correction templates
 
 ### Hyperparameters
-- [ ] test a small grid of `alpha`
-- [ ] keep all other decoding settings fixed
+- [x] test a small grid of `alpha`
+- [x] keep all other decoding settings fixed
 
 ### Success criterion
 This stage supports the hypothesis if:
 - [ ] targeted injection improves faithfulness more than matched random controls
+  - Current last-token steering through alpha 8 does not support this
 
 ---
 
@@ -865,9 +968,9 @@ You may claim **causal relevance** only if at least one of the following is true
 - [ ] ideally both happen on the same layer family
 
 If neither happens, then the subspace should be described as:
-- [ ] correlationally informative
-- [ ] useful for detection
-- [ ] not yet causally validated
+- [x] correlationally informative
+- [x] useful for detection
+- [x] not yet causally validated
 
 ---
 
@@ -1035,8 +1138,8 @@ This stage is successful if:
 - [x] AUROC-vs-K comparison plot
 - [x] layerwise heatmap / diagnostic plot of performance
 - [x] subspace-angle heatmap across layers
-- [ ] intervention pre-check figure / sanity output
-- [ ] intervention result bar chart
+- [x] intervention pre-check figure / sanity output
+- [x] intervention result bar chart
 - [ ] semantic token cluster figure
 - [ ] sample-level semantic direction panels
 - [ ] optional caption sanity-check plot
@@ -1046,7 +1149,8 @@ This stage is successful if:
 - [x] feature family comparison table
 - [x] best-layer summary table
 - [ ] K-selection table
-- [ ] intervention ablation/rescue table
+- [x] intervention ablation/rescue table
+- [x] Stage E dose-curve and flip-threshold tables
 - [ ] semantic direction summary table
 - [ ] final claim-evidence table
   - Running notes exist in `notes/findings.md`; `notes/claim_evidence_table.md` still needs final pass
@@ -1094,9 +1198,11 @@ Current status: not supported yet for FP-vs-TN. Do not claim compression advanta
 Current status: supported with an important caveat: rank/stability/performance are partly misaligned.
 
 ### Claim 6: “The structure has causal relevance.”
-- [ ] E0 engineering pre-check passed
-- [ ] ablation harms grounded answering more than controls
+- [x] E0 engineering pre-check passed
+- [x] ablation harms grounded answering more than controls
+  - Current status: L24 tail ablation has a clean dose curve and beats the norm-matched control at alpha 6; first-token full-sequence ablation is stronger than last-token, while full-sequence control stability remains a caveat
 - [ ] rescue improves hallucinated answers more than controls
+  - Current status: no FP rescue through alpha 8 with last-token steering
 
 ### Claim 7: “The structure is partially interpretable.”
 - [ ] some singular directions map to coherent vocabulary themes

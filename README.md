@@ -123,6 +123,38 @@ To prepare only the condition plan without loading the model:
   --max-samples-per-outcome 256
 ```
 
+Stage E causal intervention pilot is GPU-only. It first runs a hook precheck,
+then tests tail ablation on TN samples and supervised/TN-correction steering on
+FP samples:
+
+```bash
+bash scripts/run_gpu_stage_e.sh
+```
+
+For a smaller first pass:
+
+```bash
+LAYERS="24" MAX_SAMPLES_PER_OUTCOME=4 ALPHA_GRID="4 5 6 7 8" bash scripts/run_gpu_stage_e.sh
+```
+
+If the generated text does not change, inspect
+`outputs/interventions/intervention_precheck.csv`: the precheck records
+next-token logit deltas as well as final decoded text.
+
+For a clean TN tail-ablation dose curve:
+
+```bash
+LAYERS="20 24" OUTCOMES="TN" FAMILIES="tail" GRANULARITIES="last_token" \
+  ALPHA_GRID="4 5 6 7 8" bash scripts/run_gpu_stage_e.sh
+```
+
+For a small granularity comparison:
+
+```bash
+LAYERS="24" OUTCOMES="TN" FAMILIES="tail" GRANULARITIES="last_token full_sequence" \
+  MAX_SAMPLES_PER_OUTCOME=4 ALPHA_GRID="4 6 8" bash scripts/run_gpu_stage_e.sh
+```
+
 ## Current Local Setup
 
 - Conda environment: `after`
