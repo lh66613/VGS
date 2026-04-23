@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 import torch
 from tqdm.auto import tqdm
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, average_precision_score, f1_score, roc_auc_score
 from sklearn.model_selection import train_test_split
@@ -401,6 +403,196 @@ def analyze_stage_c_deep(
     }
 
 
+def analyze_stage_c_supervised(
+    layers: list[int],
+    focus_layers: list[int],
+    k_grid: list[int],
+    exclusion_k_grid: list[int],
+    bands: list[tuple[int, int]],
+    predictions_path: str | Path,
+    hidden_states_dir: str | Path,
+    svd_dir: str | Path,
+    output_dir: str | Path,
+    plot_dir: str | Path,
+    seed: int,
+    pls_components: int = 8,
+) -> dict[str, Any]:
+    ensure_dir(output_dir)
+    ensure_dir(plot_dir)
+    prediction_rows = read_jsonl(predictions_path)
+    labels_by_id = _fp_target_labels(prediction_rows)
+    alignment_rows: list[dict[str, Any]] = []
+    k_rows: list[dict[str, Any]] = []
+    cumulative_rows: list[dict[str, Any]] = []
+    band_rows: list[dict[str, Any]] = []
+
+    for layer in tqdm(layers, desc="supervised Stage C layers", unit="layer"):
+        diff, y, basis, cumulative = _load_diff_labels_basis(
+            layer, hidden_states_dir, svd_dir, labels_by_id
+        )
+        supervised_bases = _supervised_direction_bases(diff, y, seed, pls_components)
+        for method, supervised_basis in supervised_bases.items():
+            for k in k_grid:
+                k_eff = min(k, basis.shape[1])
+                similarity = _directed_projection_similarity(supervised_basis, basis[:, :k_eff])
+                alignment_rows.append(
+                    {
+                        "layer": layer,
+                        "method": method,
+                        "svd_k": k,
+                        "effective_svd_k": k_eff,
+                        "supervised_dim": supervised_basis.shape[1],
+                        "projection_similarity": similarity,
+                        "projection_norm": math.sqrt(max(similarity, 0.0))
+                        if supervised_basis.shape[1] == 1
+                        else math.nan,
+                        "principal_angle_degrees": math.degrees(
+                            math.acos(min(1.0, math.sqrt(max(similarity, 0.0))))
+                        )
+                        if supervised_basis.shape[1] == 1
+                        else math.nan,
+                    }
+                )
+
+        for k in tqdm(k_grid, desc=f"L{layer} extended top-K", unit="K", leave=False):
+            k_eff = min(k, basis.shape[1])
+            coords = diff @ basis[:, :k_eff]
+            metrics = _fit_probe(coords, y, seed)
+            k_rows.append(
+                {
+                    "layer": layer,
+                    "feature": "only_top_1_to_k",
+                    "k": k,
+                    "effective_k": k_eff,
+                    "explained_variance": _explained_at(cumulative, k_eff),
+                    "num_samples": int(len(y)),
+                    "num_positive": int(y.sum()),
+                    **metrics,
+                }
+            )
+
+        if layer not in focus_layers:
+            continue
+
+        svd_coords = diff @ basis
+        full_metrics = _fit_probe(svd_coords, y, seed)
+        cumulative_rows.append(
+            {
+                "layer": layer,
+                "feature": "full_svd_coordinates",
+                "k": "full",
+                "removed": "none",
+                "remaining_dim": int(svd_coords.shape[1]),
+                "explained_variance_removed": 0.0,
+                **full_metrics,
+            }
+        )
+        for k in tqdm(
+            exclusion_k_grid,
+            desc=f"L{layer} cumulative exclusion",
+            unit="K",
+            leave=False,
+        ):
+            k_eff = min(k, basis.shape[1])
+            only_metrics = _fit_probe(svd_coords[:, :k_eff], y, seed)
+            cumulative_rows.append(
+                {
+                    "layer": layer,
+                    "feature": "only_top_1_to_k",
+                    "k": k,
+                    "removed": "complement",
+                    "remaining_dim": k_eff,
+                    "explained_variance_removed": 1.0 - _explained_at(cumulative, k_eff),
+                    **only_metrics,
+                }
+            )
+            remove_metrics = _fit_probe(svd_coords[:, k_eff:], y, seed)
+            cumulative_rows.append(
+                {
+                    "layer": layer,
+                    "feature": "remove_top_1_to_k",
+                    "k": k,
+                    "removed": f"1-{k_eff}",
+                    "remaining_dim": int(svd_coords.shape[1] - k_eff),
+                    "explained_variance_removed": _explained_at(cumulative, k_eff),
+                    **remove_metrics,
+                }
+            )
+
+        for start, end in tqdm(bands, desc=f"L{layer} band exclusion", unit="band", leave=False):
+            band_start = max(start, 1)
+            band_end = min(end, basis.shape[1])
+            if band_end < band_start:
+                continue
+            band_slice = slice(band_start - 1, band_end)
+            band_width = band_end - band_start + 1
+            only_metrics = _fit_probe(svd_coords[:, band_slice], y, seed)
+            band_rows.append(
+                {
+                    "layer": layer,
+                    "feature": "only_band",
+                    "band": f"{band_start}-{band_end}",
+                    "start": band_start,
+                    "end": band_end,
+                    "width": band_width,
+                    "remaining_dim": band_width,
+                    "explained_variance_removed": 1.0
+                    - (
+                        _explained_at(cumulative, band_end)
+                        - _explained_at(cumulative, band_start - 1)
+                    ),
+                    **only_metrics,
+                }
+            )
+            kept = np.concatenate([svd_coords[:, : band_start - 1], svd_coords[:, band_end:]], axis=1)
+            remove_metrics = _fit_probe(kept, y, seed)
+            band_rows.append(
+                {
+                    "layer": layer,
+                    "feature": "remove_band",
+                    "band": f"{band_start}-{band_end}",
+                    "start": band_start,
+                    "end": band_end,
+                    "width": band_width,
+                    "remaining_dim": int(kept.shape[1]),
+                    "explained_variance_removed": _explained_at(cumulative, band_end)
+                    - _explained_at(cumulative, band_start - 1),
+                    **remove_metrics,
+                }
+            )
+
+    write_csv(
+        Path(output_dir) / "stage_c_supervised_alignment.csv",
+        alignment_rows,
+        list(alignment_rows[0].keys()) if alignment_rows else [],
+    )
+    write_csv(
+        Path(output_dir) / "stage_c_extended_k_curve.csv",
+        k_rows,
+        list(k_rows[0].keys()) if k_rows else [],
+    )
+    write_csv(
+        Path(output_dir) / "stage_c_cumulative_exclusion.csv",
+        cumulative_rows,
+        list(cumulative_rows[0].keys()) if cumulative_rows else [],
+    )
+    write_csv(
+        Path(output_dir) / "stage_c_band_exclusion.csv",
+        band_rows,
+        list(band_rows[0].keys()) if band_rows else [],
+    )
+    _plot_supervised_alignment(alignment_rows, Path(plot_dir))
+    _plot_extended_k_curve(k_rows, Path(plot_dir))
+    _plot_cumulative_exclusion(cumulative_rows, Path(plot_dir))
+    _plot_band_exclusion(band_rows, Path(plot_dir))
+    return {
+        "alignment_rows": alignment_rows,
+        "k_rows": k_rows,
+        "cumulative_rows": cumulative_rows,
+        "band_rows": band_rows,
+    }
+
+
 def _plot_spectrum(layer: int, singular_values: np.ndarray, cumulative: np.ndarray, plot_dir: Path) -> None:
     fig, axes = plt.subplots(1, 3, figsize=(12, 3.5))
     axes[0].plot(singular_values)
@@ -560,6 +752,97 @@ def _plot_stage_c_layer_diagnostics(rows: list[dict[str, Any]], plot_dir: Path) 
     plt.close(fig)
 
 
+def _plot_supervised_alignment(rows: list[dict[str, Any]], plot_dir: Path) -> None:
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return
+    ensure_dir(plot_dir)
+    for method, group in df.groupby("method"):
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        for layer, layer_group in group.groupby("layer"):
+            layer_group = layer_group.sort_values("svd_k")
+            ax.plot(
+                layer_group["svd_k"],
+                layer_group["projection_similarity"],
+                marker="o",
+                label=f"L{layer}",
+            )
+        ax.set_title(f"Supervised Subspace Alignment: {method}")
+        ax.set_xlabel("SVD top-K backbone")
+        ax.set_ylabel("Projection similarity")
+        ax.set_xscale("log", base=2)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8, ncol=2)
+        fig.tight_layout()
+        fig.savefig(plot_dir / f"stage_c_supervised_alignment_{method}.png", dpi=180)
+        plt.close(fig)
+
+
+def _plot_extended_k_curve(rows: list[dict[str, Any]], plot_dir: Path) -> None:
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for layer, group in df.groupby("layer"):
+        group = group.sort_values("k")
+        ax.plot(group["k"], group["auroc"], marker="o", label=f"L{layer}")
+    ax.set_title("Extended Top-K AUROC")
+    ax.set_xlabel("K")
+    ax.set_ylabel("AUROC")
+    ax.set_xscale("log", base=2)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(plot_dir / "stage_c_extended_topk_auroc.png", dpi=180)
+    plt.close(fig)
+
+
+def _plot_cumulative_exclusion(rows: list[dict[str, Any]], plot_dir: Path) -> None:
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
+    for feature, ax in [("only_top_1_to_k", axes[0]), ("remove_top_1_to_k", axes[1])]:
+        sub = df[df["feature"] == feature].copy()
+        sub = sub[sub["k"] != "full"]
+        if sub.empty:
+            continue
+        sub["k_numeric"] = sub["k"].astype(int)
+        for layer, group in sub.groupby("layer"):
+            group = group.sort_values("k_numeric")
+            ax.plot(group["k_numeric"], group["auroc"], marker="o", label=f"L{layer}")
+        ax.set_title(feature)
+        ax.set_xlabel("K")
+        ax.set_xscale("log", base=2)
+        ax.grid(alpha=0.25)
+    axes[0].set_ylabel("AUROC")
+    axes[1].legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(plot_dir / "stage_c_cumulative_exclusion_auroc.png", dpi=180)
+    plt.close(fig)
+
+
+def _plot_band_exclusion(rows: list[dict[str, Any]], plot_dir: Path) -> None:
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.8), sharey=True)
+    for feature, ax in [("only_band", axes[0]), ("remove_band", axes[1])]:
+        sub = df[df["feature"] == feature].copy()
+        for layer, group in sub.groupby("layer"):
+            group = group.sort_values("start")
+            ax.plot(group["band"], group["auroc"], marker="o", label=f"L{layer}")
+        ax.set_title(feature)
+        ax.set_xlabel("Band")
+        ax.tick_params(axis="x", rotation=30)
+        ax.grid(alpha=0.25)
+    axes[0].set_ylabel("AUROC")
+    axes[1].legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(plot_dir / "stage_c_band_exclusion_auroc.png", dpi=180)
+    plt.close(fig)
+
+
 def _explained_at(cumulative: np.ndarray, k: int) -> float:
     if len(cumulative) == 0:
         return math.nan
@@ -620,6 +903,69 @@ def _random_basis(dim: int, k: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     q, _ = np.linalg.qr(rng.normal(size=(dim, k)))
     return q[:, :k]
+
+
+def _load_diff_labels_basis(
+    layer: int,
+    hidden_states_dir: str | Path,
+    svd_dir: str | Path,
+    labels_by_id: dict[str, int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    hidden = load_hidden_layer(hidden_states_dir, layer)
+    sample_ids = list(hidden["sample_ids"])
+    keep = [idx for idx, sample_id in enumerate(sample_ids) if sample_id in labels_by_id]
+    y = np.array([labels_by_id[sample_ids[idx]] for idx in keep], dtype=np.int64)
+    z_img = hidden["z_img"][keep].float().numpy()
+    z_blind = hidden["z_blind"][keep].float().numpy()
+    diff = z_blind - z_img
+    svd = load_svd(svd_dir, layer)
+    basis = svd["Vh"].float().numpy().T
+    cumulative = cumulative_explained_variance(svd["singular_values"].float().numpy())
+    return diff, y, basis, cumulative
+
+
+def _supervised_direction_bases(
+    diff: np.ndarray,
+    y: np.ndarray,
+    seed: int,
+    pls_components: int,
+) -> dict[str, np.ndarray]:
+    bases: dict[str, np.ndarray] = {}
+    scaler = StandardScaler()
+    x_scaled = scaler.fit_transform(diff)
+
+    logistic = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=seed)
+    logistic.fit(x_scaled, y)
+    logistic_w = logistic.coef_[0] / np.maximum(scaler.scale_, 1e-12)
+    bases["logistic_weight"] = _orthonormal_columns(logistic_w[:, None])
+
+    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
+    lda.fit(x_scaled, y)
+    lda_w = lda.coef_[0] / np.maximum(scaler.scale_, 1e-12)
+    bases["lda_fisher"] = _orthonormal_columns(lda_w[:, None])
+
+    n_components = min(pls_components, diff.shape[1], max(1, diff.shape[0] - 1))
+    pls = PLSRegression(n_components=n_components, scale=False)
+    pls.fit(x_scaled, y.astype(np.float64))
+    pls_weights = pls.x_weights_ / np.maximum(scaler.scale_[:, None], 1e-12)
+    bases[f"pls_{n_components}"] = _orthonormal_columns(pls_weights)
+    return bases
+
+
+def _orthonormal_columns(matrix: np.ndarray) -> np.ndarray:
+    q, _ = np.linalg.qr(matrix)
+    return q
+
+
+def _directed_projection_similarity(source_basis: np.ndarray, target_basis: np.ndarray) -> float:
+    source = np.asarray(source_basis, dtype=np.float64)
+    target = np.asarray(target_basis, dtype=np.float64)
+    if source.ndim != 2 or target.ndim != 2:
+        raise ValueError("Subspace bases must be 2D arrays.")
+    if source.shape[1] == 0:
+        return 0.0
+    overlap = source.T @ target
+    return float(np.sum(overlap * overlap) / source.shape[1])
 
 
 def _subsample_rows(

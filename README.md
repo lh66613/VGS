@@ -91,6 +91,11 @@ For deeper Stage C follow-up:
   --layers 8 12 16 20 24 28 32 \
   --k-grid 4 8 16 32 64 128 256 \
   --focus-layers 20 24 28 32
+
+/data/lh/.conda/envs/after/bin/python scripts/analyze_stage_c_supervised.py \
+  --layers 8 12 16 20 24 28 32 \
+  --k-grid 4 8 16 32 64 128 256 512 1024 \
+  --focus-layers 20 24 28 32
 ```
 
 The CPU stages are also wrapped by:

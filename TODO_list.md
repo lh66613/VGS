@@ -108,6 +108,7 @@ K must be treated as a first-class experimental variable rather than a scattered
 
 - [x] Predefine a global candidate set, e.g. `K in {4, 8, 16, 32, 48, 64}`
 - [x] Extend Stage C deep grid to `K in {4, 8, 16, 32, 64, 128, 256}`
+- [x] Extend Stage C supervised/exclusion grid to `K in {4, 8, 16, 32, 64, 128, 256, 512, 1024}`
 - [x] Use exactly the same K grid in Stages A / C / D whenever feasible
 - [x] Report all main curves as functions of K, not just a best case
 - [ ] Choose a default `K*` only after Stage A + Stage C
@@ -120,6 +121,7 @@ K must be treated as a first-class experimental variable rather than a scattered
 Current K finding:
 
 - [x] Variance concentration is strong at low K, but FP-vs-TN AUROC rises mainly at K=128/256
+- [x] K=512/1024 does not uniformly improve performance; L20 and L16 peak at K=256, while L24/L32 rise more slowly and remain weaker
 - [x] Current interpretation: most variance-explaining directions are not the most hallucination-discriminative directions
 - [ ] Do not finalize a single `K*` yet; keep `K=128/256` as candidate predictive settings and `K=4` as a stable-structure setting
 
@@ -134,6 +136,7 @@ By the end of this TODO list, the project should produce:
 - [x] one SVD analysis pipeline for all tested layers
 - [x] one standardized K-sensitivity report
 - [x] one probe baseline comparison table
+- [x] one supervised-vs-SVD subspace alignment report
 - [x] one layerwise geometry report
 - [ ] one causal intervention pilot result
 - [ ] one semantic interpretation report for singular directions
@@ -161,6 +164,8 @@ project/
 │   ├── plots/
 │   ├── interventions/
 │   ├── semantics/
+│   ├── stage_c_deep/
+│   ├── stage_c_supervised/
 │   └── sanity_checks/
 ├── scripts/
 │   ├── run_pope_eval.py
@@ -178,6 +183,7 @@ project/
 │   ├── validate_pope_data.py
 │   ├── create_smoke_artifacts.py
 │   ├── analyze_stage_c_deep.py
+│   ├── analyze_stage_c_supervised.py
 │   ├── run_gpu_pope_and_hidden.sh
 │   ├── run_cpu_stage_a.sh
 │   └── run_cpu_stage_c_d.sh
@@ -510,6 +516,43 @@ But do **not** yet claim causality.
 - [x] L32 is weaker both in concentration and predictive behavior
 - [x] Best SVD band found so far: L20 directions `65-128`, AUROC `0.6317`
 - [x] Current wording: the main geometric structure and hallucination-discriminative structure are related but not identical
+
+---
+
+## C5. Supervised subspace and exclusion follow-up
+
+### Task
+- [x] Compare supervised discriminative directions against SVD top-K backbone:
+  - [x] logistic regression weight direction
+  - [x] LDA / Fisher direction
+  - [x] PLS-style supervised directions
+- [x] Measure directed projection similarity / principal angle between supervised directions and SVD top-K subspaces
+- [x] Extend top-K projected probes to `K=512/1024`
+- [x] Run cumulative and exclusion probes:
+  - [x] only top `1:K`
+  - [x] remove top `1:K`
+  - [x] only band `a:b`
+  - [x] remove band `a:b`
+
+### Outputs
+- [x] `outputs/stage_c_supervised/stage_c_supervised_alignment.csv`
+- [x] `outputs/stage_c_supervised/stage_c_extended_k_curve.csv`
+- [x] `outputs/stage_c_supervised/stage_c_cumulative_exclusion.csv`
+- [x] `outputs/stage_c_supervised/stage_c_band_exclusion.csv`
+- [x] `outputs/plots/stage_c_supervised_alignment_logistic_weight.png`
+- [x] `outputs/plots/stage_c_supervised_alignment_lda_fisher.png`
+- [x] `outputs/plots/stage_c_supervised_alignment_pls_8.png`
+- [x] `outputs/plots/stage_c_extended_topk_auroc.png`
+- [x] `outputs/plots/stage_c_cumulative_exclusion_auroc.png`
+- [x] `outputs/plots/stage_c_band_exclusion_auroc.png`
+
+### Current conclusion
+- [x] Logistic and LDA/Fisher directions are nearly orthogonal to very-low-K SVD directions
+- [x] L20 logistic direction projection similarity rises from `0.0004` at K=4 to `0.0734` at K=256 and `0.4838` at K=1024
+- [x] L20 remains the strongest top-K predictive layer, peaking at K=256 with AUROC `0.6948`
+- [x] Full SVD-coordinate probes are stronger than top-K-only probes on focused layers; L20 reaches AUROC `0.7343`
+- [x] Removing directions `1-1024` still leaves high AUROC on L20 (`0.7232`), so the top variance directions are not functionally necessary for this probe
+- [x] Most damaging single-band removals are modest, suggesting distributed residual / mid-to-tail signal rather than one uniquely necessary band
 
 ---
 
