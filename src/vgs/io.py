@@ -21,7 +21,7 @@ def write_json(path: str | Path, payload: dict[str, Any]) -> Path:
     target = Path(path)
     ensure_dir(target.parent)
     with target.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
+        json.dump(payload, f, indent=2, sort_keys=True, default=_json_default)
         f.write("\n")
     return target
 
@@ -44,6 +44,16 @@ def write_jsonl(path: str | Path, rows: list[dict[str, Any]]) -> Path:
             json.dump(row, f, ensure_ascii=False, sort_keys=True)
             f.write("\n")
     return target
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if hasattr(value, "item"):
+        return value.item()
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
 def now_utc() -> str:

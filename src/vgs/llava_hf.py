@@ -142,6 +142,50 @@ def extract_hidden_pair(
     return pairs
 
 
+@torch.inference_mode()
+def extract_condition_hidden_states(
+    model: LlavaForConditionalGeneration,
+    processor: AutoProcessor,
+    question: str,
+    image_path: str | None,
+    layers: list[int],
+    device: str,
+    readout_position: str = "last_prompt_token",
+) -> dict[int, torch.Tensor]:
+    if readout_position != "last_prompt_token":
+        raise NotImplementedError(
+            "Only last_prompt_token is implemented for condition hidden-state dumps."
+        )
+    if image_path:
+        image = Image.open(Path(image_path)).convert("RGB")
+        prompt = build_pope_prompt(processor, question)
+        inputs = processor(images=image, text=prompt, return_tensors="pt")
+        inputs = _move_inputs(inputs, device, dtype=next(model.parameters()).dtype)
+        outputs = model(
+            **inputs,
+            output_hidden_states=True,
+            return_dict=True,
+            use_cache=False,
+        )
+        index = int(inputs["attention_mask"][0].sum().item()) - 1
+    else:
+        prompt = build_blind_prompt(question)
+        inputs = processor.tokenizer(prompt, return_tensors="pt")
+        inputs = _move_inputs(inputs, device)
+        outputs = model.language_model(
+            **inputs,
+            output_hidden_states=True,
+            return_dict=True,
+            use_cache=False,
+        )
+        index = int(inputs["attention_mask"][0].sum().item()) - 1
+
+    return {
+        layer: outputs.hidden_states[layer][0, index].detach().cpu().float()
+        for layer in layers
+    }
+
+
 def _move_inputs(inputs: Any, device: str, dtype: torch.dtype | None = None) -> Any:
     moved = {}
     for key, value in inputs.items():

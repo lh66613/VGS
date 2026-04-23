@@ -137,6 +137,7 @@ By the end of this TODO list, the project should produce:
 - [x] one standardized K-sensitivity report
 - [x] one probe baseline comparison table
 - [x] one supervised-vs-SVD subspace alignment report
+- [x] one full-space coordinate-control sanity check
 - [x] one layerwise geometry report
 - [ ] one causal intervention pilot result
 - [ ] one semantic interpretation report for singular directions
@@ -166,6 +167,9 @@ project/
 │   ├── semantics/
 │   ├── stage_c_deep/
 │   ├── stage_c_supervised/
+│   ├── stage_c_coordinate_control/
+│   ├── stage_b/
+│   ├── stage_b_hidden/
 │   └── sanity_checks/
 ├── scripts/
 │   ├── run_pope_eval.py
@@ -184,9 +188,15 @@ project/
 │   ├── create_smoke_artifacts.py
 │   ├── analyze_stage_c_deep.py
 │   ├── analyze_stage_c_supervised.py
+│   ├── analyze_stage_c_coordinate_control.py
+│   ├── prepare_stage_b_conditions.py
+│   ├── dump_stage_b_condition_hidden_states.py
+│   ├── analyze_stage_b_geometry.py
 │   ├── run_gpu_pope_and_hidden.sh
 │   ├── run_cpu_stage_a.sh
-│   └── run_cpu_stage_c_d.sh
+│   ├── run_cpu_stage_c_d.sh
+│   ├── run_gpu_stage_b_conditions.sh
+│   └── run_cpu_stage_b.sh
 └── notes/
     ├── experiment_log.md
     ├── findings.md
@@ -339,66 +349,153 @@ This stage supports the low-rank story if:
 
 ## 6. Stage B — Is It Really Image-Conditioned Correction?
 
-## B1. Four-condition comparison
+Stage B is upgraded after Stage C because top-K directions are not the whole story. Every condition comparison should report three views:
+
+- **Top-backbone score**: `||P_{V_1:K}(z_blind - z_cond)||^2`, with K in `4 / 64 / 256`
+- **Residual / tail score**: bands such as `257-1024`, plus informative mid-rank bands such as `65-128` and `129-256`
+- **Supervised decision score**: fixed logistic / LDA-Fisher directions learned from the matched FP-vs-TN reference data, used only as scalar scores in Stage B
+
+Prepared implementation:
+
+- [x] Build condition-plan script: `scripts/prepare_stage_b_conditions.py`
+- [x] Build GPU hidden dump script: `scripts/dump_stage_b_condition_hidden_states.py`
+- [x] Build CPU geometry analysis script: `scripts/analyze_stage_b_geometry.py`
+- [x] Add wrappers:
+  - [x] `scripts/run_gpu_stage_b_conditions.sh`
+  - [x] `scripts/run_cpu_stage_b.sh`
+
+Current default pilot:
+
+- [x] Focus on `FP/TN` because the current hallucination target is FP-vs-TN
+- [x] Use L20 / L24 / L32 first
+- [x] Use `max_samples_per_outcome=256` for the first GPU pilot to avoid an unnecessarily large first run
+- [x] Generate pilot condition plan: `outputs/stage_b/stage_b_condition_plan.jsonl`
+  - [x] 512 rows total
+  - [x] 256 FP / 256 TN
+  - [x] 512 / 512 adversarial mismatches available
+- [x] Run GPU condition hidden dump for L20 / L24 / L32
+- [x] Run CPU Stage B geometry analysis
+
+## B1. Four-condition comparison with multiple geometry views
 
 ### Conditions
 For the same question, prepare four inference settings when possible:
-- [ ] matched real image
-- [ ] mismatched image — random unrelated image
-- [ ] mismatched image — same-category / semantically similar distractor if feasible
-- [ ] blind / no image
+- [x] matched real image
+- [x] mismatched image — random unrelated image
+- [x] adversarial mismatched image — same question, opposite POPE label / evidence-conflicting image
+- [x] blind / no image
 - [ ] weakly related image (optional if easy to construct)
 
 ### Important construction note
 Do **not** use only one type of mismatch.
 The main contrast should include:
-- [ ] easy mismatch: random image
-- [ ] hard mismatch: semantically similar but evidence-conflicting image
+- [x] easy mismatch: random unrelated image
+- [x] hard mismatch: same question with opposite label
 
 ### Task
-- [ ] Extract hidden states for each condition
-- [ ] For each layer, compute projection-based scores such as:
+- [x] Extract hidden states for each condition
+- [x] For each layer, compute top-backbone scores:
 
 \[
-g_i^{(l)} = \|P_{V_K^{(l)}}(z_{\text{blind},i}^{(l)} - z_{\text{cond},i}^{(l)})\|_2
+g_{i,\text{top}}^{(l,K)} =
+\|P_{V_{1:K}^{(l)}}(z_{\text{blind},i}^{(l)} - z_{\text{cond},i}^{(l)})\|_2^2
+\]
+
+- [x] Compute residual / tail scores:
+
+\[
+g_{i,\text{tail}}^{(l,a:b)} =
+\|P_{V_{a:b}^{(l)}}(z_{\text{blind},i}^{(l)} - z_{\text{cond},i}^{(l)})\|_2^2
+\]
+
+- [x] Compute supervised decision scores:
+
+\[
+s_i^{(l)} = w^{(l)\top}(z_{\text{blind},i}^{(l)} - z_{\text{cond},i}^{(l)})
 \]
 
 ### What to check
-- [ ] Is the matched image condition systematically different from mismatched / blind?
-- [ ] Does `V_K` distinguish “true visual correction” from generic input perturbation?
-- [ ] Is the hard mismatch closer to matched than the easy mismatch, or does it produce a distinct failure pattern?
+- [x] Is the matched image condition systematically different from mismatched / blind?
+- [x] Does the top-backbone score distinguish visual correction from no image?
+  - Current result: yes for image vs blind, but not cleanly for correct-vs-wrong evidence
+- [x] Does the residual / tail score carry condition-specific movement?
+  - Current result: yes, `257-1024` is consistently higher for matched than random/adversarial mismatch
+- [x] Does the supervised decision score move under real image evidence rather than behaving like a dataset-only artifact?
+  - Current result: yes, FP/TN gaps open mainly under matched evidence
+- [x] Does adversarial mismatch fall between matched and blind, or form a distinct failure pattern?
+  - Current result: adversarial mismatch is not simply between matched and blind; it forms a wrong-evidence condition with lower tail correction and weaker decision separation
 
 ### Success criterion
 This stage supports the hypothesis if:
-- [ ] matched-image scores are clearly separated from mismatched / blind controls
-- [ ] random same-dimensional subspaces do not show equally strong separation
-- [ ] the matched-vs-hard-mismatch contrast remains visible, showing the signal is not merely “some image exists”
+- [x] matched-image scores are clearly separated from mismatched / blind controls in at least one stable geometry view
+- [x] adversarial mismatch differs from random mismatch, showing the signal is evidence-related rather than only image-presence-related
+- [x] supervised decision scores shift with true visual evidence, not only with POPE labels
 
 ### Output
-- [ ] condition-wise boxplots / violin plots
-- [ ] `condition_score_summary.csv`
+- [x] `outputs/stage_b/stage_b_condition_plan.jsonl`
+- [x] `outputs/stage_b_hidden/layer_{l}.pt`
+- [x] `outputs/stage_b/stage_b_sample_scores.csv`
+- [x] `outputs/stage_b/stage_b_condition_score_summary.csv`
+- [x] condition-wise score plots under `outputs/plots/`
 
 ---
 
-## B2. FP vs TN / FN vs TP analysis on POPE
+## B2. Matched-correction vs mismatched-correction geometry
 
 ### Task
-Use POPE labels and prediction outcomes to compare:
-- [ ] FP vs TN among ground-truth “no” questions
-- [ ] FN vs TP among ground-truth “yes” questions
+Directly compare:
+
+\[
+d_i^{\text{match}} = z_{\text{blind},i} - z_{\text{match},i}
+\]
+
+\[
+d_i^{\text{mismatch}} = z_{\text{blind},i} - z_{\text{mismatch},i}
+\]
+
+- [x] Compare `||d_match||^2` vs `||d_mismatch||^2`
+- [x] Compare top-backbone / residual-tail / supervised-score projections
+- [x] Compare matched vs random-mismatch vs adversarial-mismatch SVD bases
+- [x] Compare each condition basis against the original matched-reference SVD basis
 
 ### What to check
-- [ ] Are false positives associated with weaker / distorted projection patterns?
-- [ ] Are false negatives showing the same geometry or a different one?
+- [x] Does a real matched image induce qualitatively different correction geometry than a wrong image?
+- [x] Is random mismatch mostly an image-presence perturbation?
+- [x] Is adversarial mismatch closer to matched, blind, or its own geometry?
+  - Current result: adversarial and random mismatch both diverge from matched at K=64/256; top K=4 remains highly shared
 
 ### Success criterion
 This stage supports the hypothesis if:
-- [ ] projection statistics separate error types from correct cases in a consistent way
-- [ ] false positives are especially identifiable if the method is genuinely tied to hallucination risk
+- [x] matched and mismatched corrections are separated in score space
+- [x] condition-specific SVD bases are not all interchangeable
+- [x] the matched-vs-adversarial contrast remains visible after controlling for image presence
 
 ### Output
-- [ ] per-error-type plots
-- [ ] summary table by subset (`random/popular/adversarial`)
+- [x] `outputs/stage_b/stage_b_pairwise_condition_deltas.csv`
+- [x] `outputs/stage_b/stage_b_condition_subspace_similarity.csv`
+
+---
+
+## B3. Link Stage B scores to POPE FP/TN labels without training a new classifier
+
+### Task
+- [x] Compare FP/TN score distributions under matched / random-mismatch / adversarial-mismatch / blind conditions
+- [x] Check whether TN samples show stronger matched-image correction than mismatch / blind
+- [x] Check whether FP samples retain abnormal supervised decision scores even under matched visual evidence
+
+### Success criterion
+This stage supports the mechanism story if:
+- [x] TN samples show matched evidence inducing the expected correction geometry
+- [x] FP samples show weak, distorted, or less condition-sensitive correction geometry
+  - Current result: TN has stronger matched-specific residual/tail correction; FP shows a strong shift along FP-like supervised decision directions
+
+Target wording if supported:
+
+- [x] hallucination is associated not merely with the presence of image-conditioned change, but with a failure to induce the appropriate correction geometry under matched visual evidence
+
+### Output
+- [x] `outputs/stage_b/stage_b_outcome_condition_summary.csv`
+- [x] FP/TN condition plots under `outputs/plots/`
 
 ---
 
@@ -553,6 +650,35 @@ But do **not** yet claim causality.
 - [x] Full SVD-coordinate probes are stronger than top-K-only probes on focused layers; L20 reaches AUROC `0.7343`
 - [x] Removing directions `1-1024` still leaves high AUROC on L20 (`0.7232`), so the top variance directions are not functionally necessary for this probe
 - [x] Most damaging single-band removals are modest, suggesting distributed residual / mid-to-tail signal rather than one uniquely necessary band
+
+---
+
+## C6. Full-space coordinate-control sanity check
+
+### Motivation
+Full difference vectors and all SVD coordinates span the same linear space, so a large performance gap needs a pipeline/control explanation before moving to Stage B.
+
+### Task
+- [x] Use one fixed train/test split
+- [x] Use the same standardization, solver, class weighting, seed, and regularization for every representation
+- [x] Compare:
+  - [x] raw full difference
+  - [x] train-split PCA-whitened full difference
+  - [x] full SVD coordinates
+  - [x] dense random orthogonal rotation of full difference
+
+### Outputs
+- [x] `outputs/stage_c_coordinate_control/stage_c_coordinate_control.csv`
+- [x] `outputs/plots/stage_c_coordinate_control_auroc.png`
+
+### Current conclusion
+- [x] L24 raw full difference reproduces the earlier AUROC `0.6936`, so the previous discrepancy is not mainly split drift
+- [x] Full SVD coordinates remain stronger under the same split and logistic pipeline:
+  - [x] L20: raw `0.6869` vs SVD coords `0.7343`
+  - [x] L24: raw `0.6936` vs SVD coords `0.7096`
+  - [x] L32: raw `0.6694` vs SVD coords `0.7139`
+- [x] Random dense orthogonal rotation stays close to raw full difference, so the gain is not just any rotation
+- [x] Current wording: classifier performance depends on coordinate parameterization under the current standardization / regularization pipeline; full difference and all SVD coordinates should not be described as empirically interchangeable for this probe
 
 ---
 
@@ -905,7 +1031,7 @@ This stage is successful if:
 - [x] effective rank by layer
 - [x] split-half stability plot
 - [x] stability-vs-K plot
-- [ ] matched vs mismatched vs blind condition score plots
+- [x] matched vs mismatched vs blind condition score plots
 - [x] AUROC-vs-K comparison plot
 - [x] layerwise heatmap / diagnostic plot of performance
 - [x] subspace-angle heatmap across layers
@@ -941,9 +1067,11 @@ Before writing any paper claim, check the boxes honestly.
 Current status: mostly supported, but still missing shuffle controls.
 
 ### Claim 2: “The structure is related to image-conditioned correction.”
-- [ ] supported by matched vs mismatched vs blind comparisons
+- [x] supported by matched vs mismatched vs blind comparisons
 - [ ] stronger than random-subspace controls
-- [ ] not reducible to the mere presence of any image input
+  - Current Stage B uses SVD top/residual bands and supervised directions; add explicit random-subspace score controls if this claim needs to be maximally strong
+- [x] not reducible to the mere presence of any image input
+  - Current result: residual/tail and supervised-decision views distinguish matched evidence from random/adversarial mismatches, while top-backbone energy is not sufficient
 
 ### Claim 3: “The structure carries hallucination-relevant information.”
 - [x] projected features predict POPE hallucination risk
@@ -1004,7 +1132,7 @@ Current status: supported with an important caveat: rank/stability/performance a
   - Candidate K depends on purpose: K=4 for dominant stable geometry; K=128/256 for prediction
 
 ### Week / Phase 3 — Relation to hallucination / correction
-- [ ] Stage B entirely
+- [x] Stage B pilot completed for FP/TN on L20/L24/L32
 - [x] Stage C feature/probe/deep analysis completed
 - [ ] finalize `K*`
   - Deferred because Stage C shows variance/prediction mismatch
@@ -1034,7 +1162,7 @@ If time or compute becomes tight, prioritize this reduced plan:
 - [x] Stage A2 spectrum analysis
 - [x] Stage A3 split-half stability
 - [x] Stage A5 dedicated K-sensitivity analysis
-- [ ] Stage B1 matched vs mismatched vs blind comparison
+- [x] Stage B1 matched vs mismatched vs blind comparison
 - [x] Stage C1 feature comparison vs raw hidden-state probes
 - [x] Stage D1 layerwise summary
 - [ ] Stage E0 implementation pre-check

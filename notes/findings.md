@@ -183,3 +183,165 @@ Current interpretation:
 - Supervised 1D discriminative directions are substantially off-backbone at low and moderate K.
 - Hallucination-discriminative signal appears distributed across many residual / mid-to-tail SVD coordinates rather than being functionally necessary in the top few variance directions.
 - This strengthens the claim that the dominant blind-reference geometry and the hallucination decision geometry are distinct but partially coupled objects.
+
+## 2026-04-23 Stage C Coordinate-Control Sanity Check
+
+Artifacts:
+
+- Same-split coordinate control: `outputs/stage_c_coordinate_control/stage_c_coordinate_control.csv`
+- Plot: `outputs/plots/stage_c_coordinate_control_auroc.png`
+
+Control setup:
+
+- Layers: L20 / L24 / L32
+- Target: FP vs TN
+- Same train/test split for all feature representations
+- Same `StandardScaler`, logistic solver, class weighting, random seed, and regularization strength
+- Compared:
+  - raw full difference
+  - train-split PCA-whitened difference
+  - full SVD coordinates
+  - dense random orthogonal rotation of the full difference
+
+AUROC:
+
+| Layer | Raw full diff | PCA-whitened | Full SVD coords | Random orthogonal |
+| --- | ---: | ---: | ---: | ---: |
+| 20 | 0.6869 | 0.6692 | 0.7343 | 0.6776 |
+| 24 | 0.6936 | 0.6331 | 0.7096 | 0.6896 |
+| 32 | 0.6694 | 0.6612 | 0.7139 | 0.6711 |
+
+Interpretation:
+
+- The L24 raw full-difference result reproduces the earlier full-difference AUROC (`0.6936`) inside the same control script, so the discrepancy is not mainly from split drift or a different evaluation path.
+- Full SVD coordinates remain better than raw full difference under the same split and classifier settings, especially at L20 and L32.
+- A dense random orthogonal rotation is close to raw full difference, not to SVD coordinates.
+- Therefore, the full-SVD-coordinate gain is not an arbitrary rotation effect. It is more consistent with SVD-axis parameterization plus per-coordinate standardization / regularized optimization changing the effective inductive bias.
+- In writeups, full difference and all SVD coordinates should not be described as empirically interchangeable under this probe pipeline, even though they span the same linear space.
+
+## 2026-04-23 Stage B Experiment Preparation
+
+Prepared scripts:
+
+- Condition planner: `scripts/prepare_stage_b_conditions.py`
+- GPU condition hidden dump: `scripts/dump_stage_b_condition_hidden_states.py`
+- CPU geometry analysis: `scripts/analyze_stage_b_geometry.py`
+- Convenience wrappers:
+  - `scripts/run_gpu_stage_b_conditions.sh`
+  - `scripts/run_cpu_stage_b.sh`
+
+Condition plan artifact:
+
+- `outputs/stage_b/stage_b_condition_plan.jsonl`
+- Summary: `outputs/stage_b/prepare_stage_b_conditions_summary.json`
+
+Default pilot setup:
+
+- Layers: L20 / L24 / L32
+- Outcomes: FP / TN
+- Samples: 512 total, balanced as 256 FP and 256 TN
+- Conditions:
+  - matched image
+  - random unrelated mismatched image
+  - adversarial mismatched image
+  - blind / no image
+
+Condition-plan validation:
+
+- All 512 planned rows have an adversarial mismatch.
+- For this FP/TN pilot, all source samples have label `no`; adversarial mismatches are same-question, opposite-label images with label `yes`.
+- This is a clean setup for separating “some image exists” from “the image provides correct evidence for this question.”
+
+Planned Stage B analysis views:
+
+- Top-backbone scores at K=4 / 64 / 256
+- Residual / tail scores for bands including 257-1024, 65-128, and 129-256
+- Fixed supervised decision scores using logistic and LDA/Fisher directions from the matched FP-vs-TN reference data
+
+Status:
+
+- Completed. See the Stage B analysis section below.
+
+## 2026-04-23 Stage B Condition Geometry Analysis
+
+Artifacts:
+
+- Condition hidden states: `outputs/stage_b_hidden/layer_{20,24,32}.pt`
+- Sample-level scores: `outputs/stage_b/stage_b_sample_scores.csv`
+- Condition summary: `outputs/stage_b/stage_b_condition_score_summary.csv`
+- Pairwise condition deltas: `outputs/stage_b/stage_b_pairwise_condition_deltas.csv`
+- FP/TN condition summary: `outputs/stage_b/stage_b_outcome_condition_summary.csv`
+- Condition subspace similarity: `outputs/stage_b/stage_b_condition_subspace_similarity.csv`
+- Plots:
+  - `outputs/plots/stage_b_condition_scores_layer_{20,24,32}.png`
+  - `outputs/plots/stage_b_outcome_scores_layer_{20,24,32}.png`
+
+Setup:
+
+- Layers: L20 / L24 / L32
+- Samples: 512 balanced FP/TN rows from POPE `label=no`
+- Conditions: matched / random mismatch / adversarial mismatch / blind
+- Blind condition is the zero anchor for `z_blind - z_cond`, so its correction scores are zero by construction.
+
+Top-backbone observations:
+
+- Top-backbone energy clearly separates image-conditioned states from blind, but does not cleanly separate correct evidence from mismatched evidence.
+- At K=256, matched-minus-random mean deltas are:
+  - L20: -587.1
+  - L24: -520.8
+  - L32: +268.1
+- At K=256, matched-minus-adversarial mean deltas are:
+  - L20: -45.5
+  - L24: -200.0
+  - L32: -227.9
+- This suggests top-backbone energy is dominated by large image-conditioned movement rather than by evidence correctness.
+
+Residual / tail observations:
+
+- The `257-1024` residual/tail score is consistently higher for matched than for adversarial mismatch:
+  - L20: +11.8
+  - L24: +25.7
+  - L32: +39.1
+- It is also higher for matched than for random mismatch:
+  - L20: +5.7
+  - L24: +14.2
+  - L32: +17.0
+- TN samples show a stronger matched-specific residual/tail increase than FP samples:
+  - matched-minus-random, L20: FP +0.4 vs TN +11.0
+  - matched-minus-random, L24: FP +2.8 vs TN +25.6
+  - matched-minus-random, L32: FP -10.2 vs TN +44.2
+
+Supervised decision observations:
+
+- The fixed FP-vs-TN supervised decision scores separate FP/TN mainly under matched visual evidence, not under random or adversarial mismatches.
+- Logistic FP-minus-TN mean gaps:
+  - L20 matched +0.623, random +0.102, adversarial +0.133
+  - L24 matched +0.925, random +0.155, adversarial +0.231
+  - L32 matched +0.834, random +0.101, adversarial +0.196
+- LDA/Fisher shows the same pattern:
+  - L20 matched +0.451, random +0.060, adversarial +0.082
+  - L24 matched +0.711, random +0.092, adversarial +0.125
+  - L32 matched +0.769, random +0.090, adversarial +0.143
+- For FP samples, matched-minus-mismatch supervised decision deltas are positive for most samples. For example, logistic matched-minus-random is positive for 89.8% / 91.4% / 91.8% of FP samples at L20 / L24 / L32.
+- TN samples do not show the same positive decision shift; their matched-minus-random logistic means are near zero or negative.
+
+Condition subspace observations:
+
+- K=4 condition SVD bases are all highly similar, so the very top backbone is stable across conditions.
+- At K=64 and K=256, condition-specific bases diverge.
+- Matched vs adversarial projection similarity at K=256:
+  - L20: 0.4836
+  - L24: 0.4792
+  - L32: 0.4784
+- Matched vs random projection similarity at K=256:
+  - L20: 0.4937
+  - L24: 0.4849
+  - L32: 0.4768
+- This supports a real condition-specific correction geometry beyond the very top singular directions.
+
+Current interpretation:
+
+- Stage B supports the claim that the geometry is image-condition-sensitive and not merely a static FP/TN probe artifact.
+- The evidence-relevant signal is stronger in residual/tail and supervised decision views than in raw top-backbone energy.
+- TN samples show stronger matched-evidence residual/tail correction, while FP samples show weaker matched-specific residual/tail correction and a strong abnormal shift along the FP decision direction.
+- A careful wording is now justified: hallucination is associated not merely with the presence of image-conditioned change, but with distorted condition-specific correction geometry under matched visual evidence.

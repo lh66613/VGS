@@ -593,6 +593,121 @@ def analyze_stage_c_supervised(
     }
 
 
+def analyze_stage_c_coordinate_control(
+    layers: list[int],
+    predictions_path: str | Path,
+    hidden_states_dir: str | Path,
+    svd_dir: str | Path,
+    output_dir: str | Path,
+    plot_dir: str | Path,
+    seed: int,
+    standardize: bool = True,
+    max_iter: int = 2000,
+    c_value: float = 1.0,
+) -> dict[str, Any]:
+    ensure_dir(output_dir)
+    ensure_dir(plot_dir)
+    prediction_rows = read_jsonl(predictions_path)
+    labels_by_id = _fp_target_labels(prediction_rows)
+    rows: list[dict[str, Any]] = []
+    rotation_cache: dict[int, np.ndarray] = {}
+
+    for layer in tqdm(layers, desc="coordinate-control layers", unit="layer"):
+        diff, y, basis, _ = _load_diff_labels_basis(layer, hidden_states_dir, svd_dir, labels_by_id)
+        if len(np.unique(y)) < 2:
+            continue
+        indices = np.arange(len(y))
+        stratify = y if min(np.bincount(y)) >= 2 else None
+        train_idx, test_idx = train_test_split(
+            indices,
+            test_size=0.3,
+            random_state=seed,
+            stratify=stratify,
+        )
+        common = {
+            "layer": layer,
+            "num_samples": int(len(y)),
+            "num_positive": int(y.sum()),
+            "train_size": int(len(train_idx)),
+            "test_size": int(len(test_idx)),
+            "standardize": bool(standardize),
+            "solver": "lbfgs",
+            "class_weight": "balanced",
+            "C": float(c_value),
+            "max_iter": int(max_iter),
+        }
+
+        feature_specs = [
+            ("raw_full_difference", "identity", diff),
+            ("full_svd_coordinates", "all_svd_coordinates", diff @ basis),
+        ]
+        dim = diff.shape[1]
+        if dim not in rotation_cache:
+            rotation_cache[dim] = _dense_random_orthogonal(dim, seed + dim)
+        feature_specs.append(
+            (
+                "random_orthogonal_rotation",
+                "dense_random_orthogonal",
+                diff @ rotation_cache[dim],
+            )
+        )
+
+        for feature_name, transform, feature_matrix in tqdm(
+            feature_specs,
+            desc=f"L{layer} coordinate controls",
+            unit="feature",
+            leave=False,
+        ):
+            metrics = _fit_probe_fixed_split(
+                feature_matrix,
+                y,
+                train_idx,
+                test_idx,
+                seed,
+                standardize=standardize,
+                max_iter=max_iter,
+                c_value=c_value,
+            )
+            rows.append(
+                {
+                    **common,
+                    "feature": feature_name,
+                    "transform": transform,
+                    "feature_dim": int(feature_matrix.shape[1]),
+                    **metrics,
+                }
+            )
+
+        whitened_train, whitened_test = _train_pca_whiten(diff, train_idx, test_idx)
+        whitened_metrics = _fit_prepared_probe(
+            whitened_train,
+            whitened_test,
+            y[train_idx],
+            y[test_idx],
+            seed,
+            standardize=standardize,
+            max_iter=max_iter,
+            c_value=c_value,
+        )
+        rows.append(
+            {
+                **common,
+                "feature": "pca_whitened_difference",
+                "transform": "train_split_pca_whitening",
+                "feature_dim": int(whitened_train.shape[1]),
+                **whitened_metrics,
+            }
+        )
+
+    write_csv(
+        Path(output_dir) / "stage_c_coordinate_control.csv",
+        rows,
+        list(rows[0].keys()) if rows else [],
+    )
+    _plot_coordinate_control(rows, Path(plot_dir))
+    return {"coordinate_control_rows": rows}
+
+
 def _plot_spectrum(layer: int, singular_values: np.ndarray, cumulative: np.ndarray, plot_dir: Path) -> None:
     fig, axes = plt.subplots(1, 3, figsize=(12, 3.5))
     axes[0].plot(singular_values)
@@ -843,6 +958,35 @@ def _plot_band_exclusion(rows: list[dict[str, Any]], plot_dir: Path) -> None:
     plt.close(fig)
 
 
+def _plot_coordinate_control(rows: list[dict[str, Any]], plot_dir: Path) -> None:
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return
+    ensure_dir(plot_dir)
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    features = [
+        "raw_full_difference",
+        "pca_whitened_difference",
+        "full_svd_coordinates",
+        "random_orthogonal_rotation",
+    ]
+    x = np.arange(len(features))
+    layers = sorted(df["layer"].unique())
+    width = 0.8 / max(len(layers), 1)
+    for offset, layer in enumerate(layers):
+        group = df[df["layer"] == layer].set_index("feature")
+        values = [group.loc[feature, "auroc"] if feature in group.index else math.nan for feature in features]
+        ax.bar(x + offset * width, values, width=width, label=f"L{layer}")
+    ax.set_xticks(x + width * (len(layers) - 1) / 2, labels=features, rotation=20, ha="right")
+    ax.set_ylabel("AUROC")
+    ax.set_title("Full-Space Coordinate Control")
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(plot_dir / "stage_c_coordinate_control_auroc.png", dpi=180)
+    plt.close(fig)
+
+
 def _explained_at(cumulative: np.ndarray, k: int) -> float:
     if len(cumulative) == 0:
         return math.nan
@@ -903,6 +1047,13 @@ def _random_basis(dim: int, k: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     q, _ = np.linalg.qr(rng.normal(size=(dim, k)))
     return q[:, :k]
+
+
+def _dense_random_orthogonal(dim: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    matrix = rng.normal(size=(dim, dim)).astype(np.float32)
+    q, _ = np.linalg.qr(matrix)
+    return q.astype(np.float32, copy=False)
 
 
 def _load_diff_labels_basis(
@@ -1044,6 +1195,84 @@ def _fit_probe(x: np.ndarray, y: np.ndarray, seed: int) -> dict[str, float]:
         "accuracy": float(accuracy_score(y_test, predictions)),
         "f1": float(f1_score(y_test, predictions, zero_division=0)),
     }
+
+
+def _fit_probe_fixed_split(
+    x: np.ndarray,
+    y: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    seed: int,
+    standardize: bool,
+    max_iter: int,
+    c_value: float,
+) -> dict[str, float]:
+    return _fit_prepared_probe(
+        x[train_idx],
+        x[test_idx],
+        y[train_idx],
+        y[test_idx],
+        seed,
+        standardize=standardize,
+        max_iter=max_iter,
+        c_value=c_value,
+    )
+
+
+def _fit_prepared_probe(
+    x_train: np.ndarray,
+    x_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    seed: int,
+    standardize: bool,
+    max_iter: int,
+    c_value: float,
+) -> dict[str, float]:
+    if standardize:
+        scaler = StandardScaler()
+        x_train = scaler.fit_transform(x_train)
+        x_test = scaler.transform(x_test)
+    clf = LogisticRegression(
+        max_iter=max_iter,
+        class_weight="balanced",
+        random_state=seed,
+        C=c_value,
+        solver="lbfgs",
+    )
+    clf.fit(x_train, y_train)
+    probabilities = clf.predict_proba(x_test)[:, 1]
+    predictions = (probabilities >= 0.5).astype(np.int64)
+    return {
+        "auroc": float(roc_auc_score(y_test, probabilities)) if len(np.unique(y_test)) > 1 else math.nan,
+        "auprc": float(average_precision_score(y_test, probabilities)),
+        "accuracy": float(accuracy_score(y_test, predictions)),
+        "f1": float(f1_score(y_test, predictions, zero_division=0)),
+        "n_iter": int(np.max(clf.n_iter_)),
+        "coef_norm": float(np.linalg.norm(clf.coef_)),
+        "intercept": float(clf.intercept_[0]),
+    }
+
+
+def _train_pca_whiten(
+    x: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    eps: float = 1e-6,
+) -> tuple[np.ndarray, np.ndarray]:
+    x_train_raw = x[train_idx]
+    x_test_raw = x[test_idx]
+    mean = x_train_raw.mean(axis=0, keepdims=True)
+    train_centered = x_train_raw - mean
+    test_centered = x_test_raw - mean
+    _, singular_values, vt = np.linalg.svd(train_centered, full_matrices=False)
+    rank = int(np.sum(singular_values > eps))
+    if rank == 0:
+        return train_centered[:, :1] * 0.0, test_centered[:, :1] * 0.0
+    components = vt[:rank].T
+    scales = singular_values[:rank] / math.sqrt(max(train_centered.shape[0] - 1, 1))
+    scales = np.maximum(scales, eps)
+    return (train_centered @ components) / scales, (test_centered @ components) / scales
 
 
 def _layer_angle_rows(layers: list[int], k_grid: list[int], svd_dir: str | Path) -> list[dict[str, Any]]:

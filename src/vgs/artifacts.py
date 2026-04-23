@@ -62,6 +62,50 @@ def load_hidden_layer(hidden_states_dir: str | Path, layer: int) -> dict[str, An
     return payload
 
 
+def save_condition_hidden_layer(
+    output_dir: str | Path,
+    layer: int,
+    sample_ids: list[str],
+    condition_states: dict[str, torch.Tensor],
+    condition_plan_path: str | Path,
+    metadata: dict[str, Any] | None = None,
+) -> Path:
+    if not condition_states:
+        raise ValueError("condition_states must not be empty.")
+    first_shape = next(iter(condition_states.values())).shape
+    for condition, state in condition_states.items():
+        if state.shape != first_shape:
+            raise ValueError(f"Condition {condition} has shape {state.shape}; expected {first_shape}.")
+        if state.shape[0] != len(sample_ids):
+            raise ValueError(f"Condition {condition} row count does not match sample_ids.")
+    target = ensure_dir(output_dir) / f"layer_{layer}.pt"
+    torch.save(
+        {
+            "layer": layer,
+            "sample_ids": sample_ids,
+            "conditions": {
+                condition: state.detach().cpu().float()
+                for condition, state in condition_states.items()
+            },
+            "condition_plan_path": str(condition_plan_path),
+            "metadata": metadata or {},
+        },
+        target,
+    )
+    return target
+
+
+def load_condition_hidden_layer(hidden_states_dir: str | Path, layer: int) -> dict[str, Any]:
+    path = Path(hidden_states_dir) / f"layer_{layer}.pt"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing condition hidden-state artifact: {path}")
+    payload = torch.load(path, map_location="cpu")
+    for key in ["sample_ids", "conditions"]:
+        if key not in payload:
+            raise KeyError(f"{path} is missing required key: {key}")
+    return payload
+
+
 def save_difference_matrix(
     output_dir: str | Path,
     layer: int,

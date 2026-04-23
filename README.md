@@ -96,6 +96,9 @@ For deeper Stage C follow-up:
   --layers 8 12 16 20 24 28 32 \
   --k-grid 4 8 16 32 64 128 256 512 1024 \
   --focus-layers 20 24 28 32
+
+/data/lh/.conda/envs/after/bin/python scripts/analyze_stage_c_coordinate_control.py \
+  --layers 20 24 32
 ```
 
 The CPU stages are also wrapped by:
@@ -103,6 +106,21 @@ The CPU stages are also wrapped by:
 ```bash
 bash scripts/run_cpu_stage_a.sh
 bash scripts/run_cpu_stage_c_d.sh
+```
+
+Stage B is split into a GPU hidden-state step and a CPU analysis step. The
+default pilot uses FP/TN samples with 256 examples per outcome on L20/L24/L32:
+
+```bash
+bash scripts/run_gpu_stage_b_conditions.sh
+bash scripts/run_cpu_stage_b.sh
+```
+
+To prepare only the condition plan without loading the model:
+
+```bash
+/data/lh/.conda/envs/after/bin/python scripts/prepare_stage_b_conditions.py \
+  --max-samples-per-outcome 256
 ```
 
 ## Current Local Setup
