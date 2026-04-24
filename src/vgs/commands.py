@@ -31,6 +31,7 @@ from vgs.llava_hf import extract_hidden_pair, generate_pope_answer, load_llava_h
 from vgs.pope import classify_outcome, parse_yes_no
 from vgs.artifacts import read_jsonl, save_hidden_layer
 from vgs.stage_e import run_intervention_pilot, run_intervention_precheck
+from vgs.semantics import run_semantic_interpretation
 
 
 def _finish(args: argparse.Namespace, stage: str, output_dir: str | Path, payload: dict[str, Any]) -> Path:
@@ -663,22 +664,68 @@ def semantic_interpretation_main() -> None:
     parser = argparse.ArgumentParser(description="Interpret top singular directions semantically.")
     add_common_args(parser)
     add_layer_args(parser)
-    parser.add_argument("--k", type=int, required=True)
+    parser.add_argument("--model-path", default=None)
+    parser.add_argument("--k", type=int, default=8)
+    parser.add_argument("--top-n", type=int, default=30)
+    parser.add_argument("--tail-layer", type=int, default=24)
+    parser.add_argument("--tail-band", default="257-1024")
+    parser.add_argument("--rescue-layer", type=int, default=32)
     parser.add_argument("--svd-dir", default="outputs/svd")
-    parser.add_argument("--metadata", default="outputs/hidden_states/metadata.json")
+    parser.add_argument("--hidden-states-dir", default="outputs/hidden_states")
+    parser.add_argument("--predictions", default="outputs/predictions/pope_predictions.jsonl")
+    parser.add_argument("--condition-plan", default="outputs/stage_b/stage_b_condition_plan.jsonl")
+    parser.add_argument("--condition-hidden-dir", default="outputs/stage_b_hidden")
+    parser.add_argument("--apply-final-norm", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--normalize-token-vectors", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--natural-token-filter", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-dir", default="outputs/semantics")
     args = parser.parse_args()
+    config = load_config(args.config)
+    model_path = args.model_path or config_get(config, "model.checkpoint_path")
+    tail_start, tail_end = [int(item) for item in args.tail_band.split("-", 1)]
+    payload = {
+        "layers": resolve_layers(args),
+        "k": args.k,
+        "top_n": args.top_n,
+        "model_path": model_path,
+        "svd_dir": args.svd_dir,
+        "hidden_states_dir": args.hidden_states_dir,
+        "predictions": args.predictions,
+        "tail_layer": args.tail_layer,
+        "tail_band": args.tail_band,
+        "rescue_layer": args.rescue_layer,
+        "condition_plan": args.condition_plan,
+        "condition_hidden_dir": args.condition_hidden_dir,
+        "apply_final_norm": args.apply_final_norm,
+        "normalize_token_vectors": args.normalize_token_vectors,
+        "natural_token_filter": args.natural_token_filter,
+    }
+    if not args.dry_run:
+        payload.update(
+            run_semantic_interpretation(
+                layers=resolve_layers(args),
+                k=args.k,
+                model_path=model_path,
+                svd_dir=args.svd_dir,
+                hidden_states_dir=args.hidden_states_dir,
+                predictions_path=args.predictions,
+                output_dir=args.output_dir,
+                tail_layer=args.tail_layer,
+                tail_band=(tail_start, tail_end),
+                rescue_layer=args.rescue_layer,
+                top_n=args.top_n,
+                apply_final_norm=args.apply_final_norm,
+                normalize_token_vectors=args.normalize_token_vectors,
+                natural_token_filter=args.natural_token_filter,
+                condition_plan_path=args.condition_plan,
+                condition_hidden_dir=args.condition_hidden_dir,
+            )
+        )
     _finish(
         args,
         "semantic_interpretation",
         args.output_dir,
-        {
-            "layers": resolve_layers(args),
-            "k": args.k,
-            "svd_dir": args.svd_dir,
-            "metadata": args.metadata,
-            "todo": "Rank samples by singular-direction coordinates and summarize visual-semantic patterns.",
-        },
+        payload,
     )
 
 

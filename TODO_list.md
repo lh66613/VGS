@@ -1077,43 +1077,62 @@ Recommended naming policy:
 
 ### Task
 For each singular direction `v_k` in the chosen layer(s):
-- [ ] project `v_k` through the LM head or an equivalent token-space map
-- [ ] collect top positive / top negative vocabulary items
-- [ ] save token lists for several K values and candidate layers
+- [x] project `v_k` through the LM head or an equivalent token-space map
+- [x] collect top positive / top negative vocabulary items
+- [x] save token lists for several K values and candidate layers
+
+Completed lightweight Stage G pass:
+- layers: `20 / 24 / 32`
+- top-SVD directions: first `8` directions per layer
+- residual/tail object: `L24` band `257-1024`
+- rescue objects: `L32` `question_tn_correction`, `object_tn_correction`, `local_knn_tn_correction`
+- artifacts: `outputs/semantics/`
 
 ### What to check
-- [ ] Do some directions show coherent semantic clusters?
-- [ ] Are there recognizable object / attribute / spatial / counting tokens?
+- [x] Do some directions show coherent semantic clusters?
+- [x] Are there recognizable object / attribute / spatial / counting tokens?
+
+Current finding:
+- top-SVD backbone directions contain broad scene / object / attribute / count / action themes
+- `L24_tail_257_1024` is comparatively object-heavy
+- `L32` local TN rescue directions look more like relation / context / yes-no arbitration axes than object-noun axes
 
 ### Success criterion
 This stage supports semantic interpretability if:
-- [ ] top tokens for a direction are not random-looking
-- [ ] multiple directions show distinct, reusable semantic themes
+- [x] top tokens for a direction are not random-looking
+- [x] multiple directions show distinct, reusable semantic themes
 
 ### Output
-- [ ] `semantic_tokens_layer_{l}_K_{K}.json`
-- [ ] one summary table of top directions and token themes
+- [x] `semantic_tokens_layer_{l}_K_{K}.json`
+  - Implemented as `outputs/semantics/semantic_projection_tokens.jsonl`
+- [x] one summary table of top directions and token themes
+  - `outputs/semantics/semantic_projection_summary.md`
+  - `outputs/semantics/semantic_cluster_summary.csv`
+  - `outputs/semantics/semantic_object_summary.csv`
 
 ---
 
 ## G2. Per-direction semantic clustering
 
 ### Task
-- [ ] Group projected tokens by rough semantic class:
-  - [ ] object category
-  - [ ] attribute / color
-  - [ ] spatial relation
-  - [ ] counting / quantity
-  - [ ] negation / uncertainty
+- [x] Group projected tokens by rough semantic class:
+  - [x] object category
+  - [x] attribute / color
+  - [x] spatial relation
+  - [x] counting / quantity
+  - [x] negation / uncertainty
 - [ ] Visualize per-direction token clusters
+  - Current lightweight output is a CSV / markdown summary; figure still optional.
 
 ### What to check
-- [ ] Are leading directions specialized?
+- [x] Are leading directions specialized?
 - [ ] Do early singular directions look more semantically coherent than later ones?
+  - Partially checked for first 8 top-SVD directions only; a full later-direction comparison is still open.
 
 ### Success criterion
 This stage supports the “semantic basis” story if:
 - [ ] the first few directions appear more structured and interpretable than the tail
+  - Current result is subtler: top directions are structured, but the `L24` tail slice is also semantically meaningful and object-heavy. This supports partial interpretability, not a simple “top directions are the semantic basis” story.
 
 ### Output
 - [ ] semantic cluster figure
@@ -1124,40 +1143,52 @@ This stage supports the “semantic basis” story if:
 ## G3. Sample-level interpretation
 
 ### Task
-- [ ] For each direction `v_k`, retrieve samples with strongest positive / negative projection
-- [ ] Inspect whether those samples share consistent visual semantics
-- [ ] Compare grounded correct samples and hallucinated samples on the same direction
+- [x] For each direction `v_k`, retrieve samples with strongest positive / negative projection
+- [x] Inspect whether those samples share consistent visual semantics
+- [x] Compare grounded correct samples and hallucinated samples on the same direction
+
+Completed output:
+- `outputs/semantics/semantic_sample_extremes.csv`
+- updated `outputs/semantics/semantic_projection_summary.md`
 
 ### What to check
-- [ ] Does a direction activate on a coherent family of images / questions?
+- [x] Does a direction activate on a coherent family of images / questions?
 - [ ] Are hallucinated cases missing or misusing that direction?
+  - Current result is mixed: some extreme samples are semantically coherent, but individual directions do not cleanly isolate FP cases.
 
 ### Success criterion
 This stage supports semantic interpretability if:
-- [ ] sample-level behavior aligns with the vocabulary projection story
+- [x] sample-level behavior aligns with the vocabulary projection story
+  - Conservative reading: alignment exists in extreme samples, but it is not strong enough to support a single-direction detector claim.
 
 ### Output
-- [ ] nearest-neighbor sample panels for top directions
+- [x] nearest-neighbor sample panels for top directions
+  - Implemented as CSV sample panels rather than rendered image panels.
 - [ ] one qualitative appendix note
+  - Findings now include a text summary; image panels remain optional for a paper appendix.
 
 ---
 
 ## G4. Grounded vs hallucinated vocabulary projection comparison
 
 ### Task
-- [ ] Compare the token-space projections or directional coefficients between:
-  - [ ] grounded correct samples
-  - [ ] hallucinated samples
-- [ ] Check whether certain directions weaken, flip, or become noisy in hallucinated cases
+- [x] Compare the token-space projections or directional coefficients between:
+  - [x] grounded correct samples
+  - [x] hallucinated samples
+- [x] Check whether certain directions weaken, flip, or become noisy in hallucinated cases
+
+Completed output:
+- `outputs/semantics/semantic_outcome_contrasts.csv`
 
 ### Success criterion
 This stage supports the interpretability story if:
 - [ ] grounded and hallucinated cases differ in a direction-specific way rather than only by total norm
+  - Current result: direction-specific differences exist but are small. Best single-object `FP_vs_TN` AUC is only about `0.56`; most relevant objects are near chance. This supports semantic interpretation, not standalone discrimination.
 
 ### Interpretation allowed after Stage G
 If Stage G passes, it is reasonable to say:
-- [ ] the subspace is not only predictive but partially interpretable
-- [ ] some singular directions behave like reusable visual-semantic coordinates
+- [x] the subspace is not only predictive but partially interpretable
+- [x] some singular directions behave like reusable visual-semantic coordinates
 
 Do **not** claim a complete semantic basis unless the results are extremely clean.
 
@@ -1270,14 +1301,17 @@ Current status: supported with an important caveat: rank/stability/performance a
   - Current status: the strongest clean local rescue remains at `L32`, where question/object-conditioned TN directions still beat reverse logistic after expansion to `64` FP samples and random control stays clean; however decoded-answer rescue is still only `3/64` and concentrated on borderline `popular` samples
 
 ### Claim 7: “The structure is partially interpretable.”
-- [ ] some singular directions map to coherent vocabulary themes
-- [ ] sample-level behavior supports those themes
+- [x] some singular directions map to coherent vocabulary themes
+  - Current status: top-SVD directions at `L24 / L32` map to scene / object / attribute / counting / action-like token clusters
+- [x] sample-level behavior supports those themes
 - [ ] grounded vs hallucinated cases differ direction-specifically
+  - Current caveat: outcome differences are direction-specific but weak; Stage G should not be used as a detector claim.
 
 ### Claim 8: “It should be called a visual grounding subspace.”
 - [ ] only check if Stage B and Stage E provide strong support
-- [ ] Stage G gives compatible semantic evidence
-- [ ] otherwise use a weaker name
+- [x] Stage G gives compatible semantic evidence
+- [x] otherwise use a weaker name
+  - Current naming recommendation: **grounding-related correction geometry** rather than full **visual grounding subspace**
 
 ### Claim 9: “The signal likely extends beyond POPE yes/no settings.”
 - [ ] only check if Stage H is run
@@ -1313,13 +1347,15 @@ Current status: supported with an important caveat: rank/stability/performance a
 - [x] produce one clean layerwise summary figure
 
 ### Week / Phase 5 — Causal pre-check and pilot (`1–2 weeks depending on E0 outcome`)
-- [ ] Stage E0 first
-- [ ] if E0 passes, continue to E1–E5
+- [x] Stage E0 first
+- [x] if E0 passes, continue to E1–E5
 - [ ] if E0 fails, switch to minimal-version causal note and do not overclaim
+  - No longer applicable to the current path because E0 passed; keep as a historical contingency.
 
 ### Week / Phase 6 — Interpretation and optional generalization
 - [ ] Stage F
-- [ ] Stage G
+- [x] Stage G lightweight semantic projection and sample-level checks completed
+  - Remaining optional work: rendered image panels and a qualitative appendix figure
 - [ ] Stage H optional sanity check if time allows
 - [ ] fill final claim-evidence checklist
 - [ ] write one-page conclusion on what is validated vs still speculative
@@ -1336,9 +1372,10 @@ If time or compute becomes tight, prioritize this reduced plan:
 - [x] Stage B1 matched vs mismatched vs blind comparison
 - [x] Stage C1 feature comparison vs raw hidden-state probes
 - [x] Stage D1 layerwise summary
-- [ ] Stage E0 implementation pre-check
-- [ ] Stage E3 one ablation pilot at the best layer
-- [ ] Stage G1 one lightweight semantic token projection figure
+- [x] Stage E0 implementation pre-check
+- [x] Stage E3 one ablation pilot at the best layer
+- [x] Stage G1 one lightweight semantic token projection
+  - Current output is markdown / CSV / JSONL rather than a plotted figure.
 
 If only this minimal version is completed well, you can still make a strong case that the method is more than a detector prototype.
 

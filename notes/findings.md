@@ -1176,3 +1176,220 @@ Current best honest reading:
 
 - there is repeatable causal evidence that **later-layer local TN-conditioned correction geometry is more useful than the global supervised rescue direction**
 - but the effect is currently strongest only for borderline hallucinations, not for the bulk of FP samples
+
+## 2026-04-24 Stage G Semantic Projection
+
+After the Stage E returns began to diminish, we shifted to semantic interpretation rather than further alpha / rescue-vector search.
+
+The first Stage G pass projects three geometry objects into vocabulary space using the LLaVA language-model head:
+
+- top-SVD backbone directions at `L20 / L24 / L32`
+- the `L24` residual/tail slice `257-1024`
+- `L32` local TN-conditioned rescue directions:
+  - `question_tn_correction`
+  - `object_tn_correction`
+  - `local_knn_tn_correction`
+
+Implementation notes:
+
+- only LM-head / final-norm tensors are loaded, not the full model
+- token vectors are row-normalized before projection to reduce rare-token norm bias
+- a natural-token filter is applied to remove most invalid, punctuation-only, and noisy subword tokens
+- outputs are saved under `outputs/semantics/`
+
+Main artifacts:
+
+- `outputs/semantics/semantic_projection_summary.md`
+- `outputs/semantics/semantic_projection_tokens.jsonl`
+- `outputs/semantics/semantic_cluster_summary.csv`
+- `outputs/semantics/semantic_object_summary.csv`
+- `outputs/semantics/semantic_interpretation_summary.json`
+
+### Main result
+
+The three geometry objects have visibly different semantic fingerprints.
+
+#### 1. Top-SVD backbone directions look like broad visual / scene axes
+
+The cleanest examples appear around `L24` and `L32`.
+
+At `L24`, several top directions map to interpretable visual clusters:
+
+- `L24_svd_4`: sky / clouds / sun / view-like tokens
+- `L24_svd_5`: trees / leaves / branches versus indoor wall / door-like tokens
+- `L24_svd_6`: sky / blue / cloud versus tree / leaf / woods-like tokens
+- `L24_svd_7` and `L24_svd_8`: window / glass / wall / floor / roof-like tokens
+
+At `L32`, the backbone directions are still interpretable but begin to mix visual content with decision / relation structure:
+
+- `L32_svd_5`: door / room / kitchen / cabinet versus tree / sky / cloud-like tokens
+- `L32_svd_7`: person-action words such as holding / sitting / watching versus scene-background words
+- `L32_svd_3`: counting / digit tokens versus visual scene/object tokens
+
+Interpretation:
+
+- the top-SVD backbone is not random-looking
+- it appears to contain broad reusable visual-semantic axes
+- however, the axes are not purely object-presence detectors; many are scene, texture, spatial, count, or action contrasts
+
+#### 2. The `L24` tail slice is more object-heavy than the top backbone
+
+The `L24_tail_257_1024` subspace-energy projection surfaces concrete POPE-relevant object tokens:
+
+- `horse`
+- `cat`
+- `bus`
+- `cow`
+- `horses`
+- `motor`
+- stop / stopped / stopping-like tokens
+
+The automatic category summary marks the slice as object-heavy relative to most individual top-SVD directions.
+
+Interpretation:
+
+- this supports the earlier Stage B / E story that the useful residual/tail slice is not just generic variance
+- semantically, it is closer to concrete object evidence than the broad top-SVD backbone
+- this is exactly the kind of distinction needed for the claim that top variance geometry and hallucination-relevant correction geometry are partly misaligned
+
+#### 3. The `L32` local rescue directions look decision-arbitration-like, not object-noun-like
+
+The `L32` local TN-conditioned directions share a very stable token signature:
+
+- positive side: `with`, `over`, `being`, `like`, `out`, `near`, `high`, `back`, `large`
+- negative side: `yes`, `no`, `there`, `yeah`, `despite`, `usually`, `unfortunately`, `whether`
+
+This is different from the `L24` tail slice.
+
+Interpretation:
+
+- `L32` local rescue directions do not look like simple object axes
+- they look more like relational / contextual / decision-arbitration axes
+- this fits the Stage E result: `L32` rescue is useful only near the yes/no boundary and mostly shifts margins rather than broadly rewriting visual evidence
+
+### Current interpretation
+
+Stage G gives a useful semantic decomposition:
+
+| Geometry object | Current semantic reading |
+| --- | --- |
+| top-SVD backbone | broad visual-scene / attribute / count / action axes |
+| `L24` tail `257-1024` | more concrete object-evidence-heavy correction slice |
+| `L32` local TN rescue | later decision / relation / yes-no arbitration direction |
+
+This makes the mechanism chain more narratable:
+
+1. The dominant SVD backbone captures large visual-semantic changes caused by image conditioning.
+2. The hallucination-sensitive correction signal is partly displaced into lower-variance residual/tail directions.
+3. Later-layer local TN-conditioned directions appear to act less like object detectors and more like boundary-level arbitration signals.
+
+### Caveat
+
+This is a vocabulary-space semantic projection, not a full mechanistic logit-lens proof.
+
+The result should be described as a semantic fingerprint of the directions, not as proof that these exact tokens mediate the behavior.
+
+Current strongest honest claim:
+
+- the geometry is **partially interpretable**
+- top backbone, residual/tail correction, and local rescue directions have different semantic fingerprints
+- this supports a weaker but useful name such as **grounding-related correction geometry**
+- it is still too early to call it a complete or universal visual grounding subspace
+
+## 2026-04-24 Stage G Sample-Level Semantic Check
+
+We then extended Stage G from token-space projection to sample-level checks.
+
+For each interpreted object, the script now computes sample coefficients over the full POPE hidden-state set:
+
+- signed direction score for top-SVD and local-rescue directions
+- subspace-energy score for the `L24` tail slice
+- top positive / negative / energy samples
+- outcome-level score summaries
+- pairwise contrasts such as `FP_vs_TN`
+
+New artifacts:
+
+- `outputs/semantics/semantic_sample_extremes.csv`
+- `outputs/semantics/semantic_outcome_contrasts.csv`
+- updated `outputs/semantics/semantic_projection_summary.md`
+
+### Main result
+
+The sample-level check supports the semantic-fingerprint interpretation, but **does not** support treating any single semantic direction as a strong FP/TN classifier.
+
+The strongest `FP_vs_TN` single-object contrasts remain small:
+
+| Object | Reading | Mean diff FP-TN | Cohen d | AUC |
+| --- | --- | ---: | ---: | ---: |
+| `L20_svd_8` | window / wall-ish backbone axis | `+0.8904` | `+0.212` | `0.562` |
+| `L24_svd_7` | window / wall-ish backbone axis | `-0.9872` | `-0.154` | `0.456` |
+| `L32_svd_5` | door / room vs tree / sky axis | `-1.6153` | `-0.130` | `0.454` |
+| `L24_tail_257_1024` | object-heavy tail slice | `-0.3978` | `-0.077` | `0.485` |
+| `L32_local_knn_tn_correction` | local rescue arbitration direction | `-0.7211` | `-0.096` | `0.476` |
+| `L32_question_tn_correction` | local rescue arbitration direction | `-0.5124` | `-0.067` | `0.482` |
+
+This is useful because it prevents overclaiming:
+
+- the vocabulary projection gives interpretable fingerprints
+- the sample coefficients show some coherent extreme examples
+- but individual directions are not enough to separate hallucinated from grounded cases by themselves
+
+### Object-specific observations
+
+#### `L24_tail_257_1024`
+
+The highest-energy samples are mostly correct negative cases:
+
+- top-20 energy outcomes: `18 TN`, `2 FP`
+- examples include absent-object questions such as refrigerator / dining table / toothbrush
+
+This is compatible with the Stage E ablation result:
+
+- the tail slice seems especially important for maintaining correct negative evidence
+- removing it damages TN behavior
+- but its raw energy alone is not a strong global FP/TN detector
+
+#### `L32` local TN rescue directions
+
+For `question_tn_correction` and `object_tn_correction`, positive extremes include a mix of TN and TP, while negative extremes are heavily TP/FN.
+
+For `local_knn_tn_correction`:
+
+- positive top-20: `10 TN`, `9 TP`, `1 FP`
+- negative top-20: `10 TP`, `6 FN`, `4 TN`
+
+This fits the previous interpretation:
+
+- the L32 rescue directions are not simple object-presence axes
+- they look more like late-stage decision / relation / yes-no arbitration directions
+- their intervention effect is therefore expected to be boundary-local, not broadly separative
+
+#### Top-SVD visual axes
+
+Several top-SVD axes show coherent sample extremes:
+
+- `L24_svd_5`: potted-plant / tree-like positives and person-heavy negatives
+- `L32_svd_5`: indoor dining-table / chair-like positives and outdoor / object-mismatch negatives
+- `L32_svd_7`: person/action-like positive token signature, but sample extremes are mixed
+
+This supports partial interpretability, but not a clean semantic basis.
+
+### Updated interpretation
+
+Stage G now supports three increasingly careful claims:
+
+1. Vocabulary-space projections reveal non-random semantic fingerprints.
+2. Sample extremes often contain recognizable object / scene / decision themes.
+3. Outcome separation from any single interpreted direction is weak.
+
+So the right framing is:
+
+- **not** “we found a semantic coordinate that detects hallucination”
+- but rather “the geometry contains partially interpretable visual and decision-related components, whose causal relevance appears only when combined with the Stage B/E evidence”
+
+This makes the overall mechanism story stronger because it is more honest:
+
+- Stage C/B/E provide the behavioral and causal evidence
+- Stage G explains what the geometry seems to be about
+- Stage G alone should not be used as a detector claim
