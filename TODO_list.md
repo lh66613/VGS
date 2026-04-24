@@ -183,6 +183,7 @@ project/
 │   ├── intervention_precheck.py
 │   ├── intervention_pilot.py
 │   ├── analyze_stage_e_results.py
+│   ├── run_gpu_stage_e_fp_rescue.sh
 │   ├── semantic_interpretation.py
 │   ├── chair_sanity_check.py
 │   ├── validate_pope_data.py
@@ -751,6 +752,11 @@ Prepared implementation:
 - [x] Dry-run E0 and pilot CLIs without loading the model
 - [x] Add post-hoc Stage E analysis script: `scripts/analyze_stage_e_results.py`
 - [x] Expose `MAX_NEW_TOKENS` in `scripts/run_gpu_stage_e.sh` so first-token intervention pilots can be run cleanly
+- [x] Add FP rescue wrapper: `scripts/run_gpu_stage_e_fp_rescue.sh`
+- [x] Add explicit rescue control: `random_rescue_control`
+- [x] Add sign-reversed supervised rescue diagnostics:
+  - [x] `reverse_logistic_fp_direction`
+  - [x] `reverse_lda_fp_direction`
 
 Default pilot:
 
@@ -922,8 +928,8 @@ z' = z + \alpha w_{\text{decision}}
 
 Next rescue criterion should be logit-level before decoded-answer-level:
 
-- [ ] Check whether `logit(No) - logit(Yes)` increases under rescue directions
-- [ ] Compare margin movement against random steering controls
+- [x] Prepare analysis to check whether `logit(No) - logit(Yes)` increases under rescue directions
+- [x] Add random steering control for margin comparisons
 - [ ] Only treat decoded flips as a later, stronger success condition
 
 ### Primary definition of `r`
@@ -940,14 +946,73 @@ Use a concrete default instead of a vague class average:
 - [x] reduction in FP rate
   - First and second pilots: FP rate stayed 1.0
 - [ ] whether rescue helps more than random-direction injection
-  - Add explicit random steering control if stronger-alpha pilot shows movement
+  - Updated result: `reverse_logistic_fp_direction` is better than random at the margin level and matches `add_tn_correction` on the single decoded flip, but the effect is still small
+
+### Next FP rescue pilot
+
+- [ ] Run FP-only first-token rescue:
+  - [x] First global rescue pilot completed at L24 with `max_new_tokens=1`
+
+```bash
+bash scripts/run_gpu_stage_e_fp_rescue.sh
+```
+
+- [ ] Analyze with:
+
+```bash
+/data/lh/.conda/envs/after/bin/python scripts/analyze_stage_e_results.py \
+  --artifact-prefix stage_e_fp_rescue \
+  --target-prediction no
+```
+
+- [ ] Next diagnostic run: include sign-reversed supervised directions and compare against the current nominal rescue directions
+  - [x] Reverse-direction diagnostic completed
+  - `reverse_logistic_fp_direction` is the strongest supervised rescue direction so far
+  - `reverse_lda_fp_direction` helps at the margin level but does not flip any sample
+- [ ] Next local rescue run: compare newly added sample-conditioned directions against reverse logistic / TN correction / random control
+  - [x] Local matched-template pilot completed
+  - `local_matched_minus_random` and `local_matched_minus_adversarial` stay near random-control strength and flip 0/16 samples
+  - [x] Rerun completed after bug fix for `local_knn_tn_correction` / `question_tn_correction` / `object_tn_correction`
+  - `question_tn_correction` and `object_tn_correction` flip the same borderline FP sample at alpha 6, earlier than `reverse_logistic_fp_direction` / `add_tn_correction` / `local_knn_tn_correction`
+  - Aggregate margin result still favors `reverse_logistic_fp_direction`
+  - [x] Multi-layer sweep completed on `L20 / L24 / L32`
+  - `L20` flips earlier but is not clean because `random_rescue_control` also flips `1/16`
+  - `L24` remains a clean reference layer with strong reverse-logistic rescue
+  - `L32` is now the strongest local-rescue layer: `question_tn_correction` / `object_tn_correction` beat `reverse_logistic_fp_direction` on aggregate margin while random control stays clean
+  - [x] Expanded-sample check completed on `L32` with `L24` as the reference layer (`32` FP samples each)
+  - `L32` local TN-conditioned rescue remains strongest after expansion
+  - `L24` still favors `reverse_logistic_fp_direction`
+  - both layers now rescue `2/32` borderline FP samples
+  - [x] Larger-sample check completed on `L32` with `L24` as the reference layer (`64` FP samples each)
+  - `L32` still favors `question_tn_correction` / `object_tn_correction`
+  - `L24` still favors `reverse_logistic_fp_direction`
+  - rescue grows from `2/32` to `3/64`, but all rescued cases remain borderline `popular` FP samples
+  - [ ] Next expansion target: decide whether to keep scaling on POPE FP samples or switch to a different benchmark / model for external validity
 
 Direction upgrade:
 
 - [ ] Replace global TN mean with more local directions if global steering remains weak:
-  - [ ] same-question / same-object cluster TN-like direction
-  - [ ] matched-minus-random local correction template
+  - [x] same-question / same-object cluster TN-like direction
+  - [x] matched-minus-random local correction template
+  - [x] matched-minus-adversarial local correction template
+  - [x] sample-conditioned TN-neighborhood correction template
   - [ ] layer-specific and outcome-specific correction templates
+  - Current rationale: sign reversal fixes part of the supervised-direction problem, but a single global vector still rescues only 1/16 samples
+
+Prepared local rescue directions now implemented:
+
+- [x] `local_knn_tn_correction`
+- [x] `question_tn_correction`
+- [x] `object_tn_correction`
+- [x] `local_matched_minus_random`
+- [x] `local_matched_minus_adversarial`
+
+Coverage note for the current 16-sample FP pilot:
+
+- [x] all 16 selected FP samples overlap with Stage B condition hidden artifacts
+- [x] all 16 selected FP samples have exact-question TN support
+- [x] all 16 selected FP samples have same-object TN support
+- [x] indexing bug fixed so the 16 selected FP samples now correctly resolve `local_knn_tn_correction` / `question_tn_correction` / `object_tn_correction`
 
 ### Hyperparameters
 - [x] test a small grid of `alpha`
@@ -1202,7 +1267,7 @@ Current status: supported with an important caveat: rank/stability/performance a
 - [x] ablation harms grounded answering more than controls
   - Current status: L24 tail ablation has a clean dose curve and beats the norm-matched control at alpha 6; first-token full-sequence ablation is stronger than last-token, while full-sequence control stability remains a caveat
 - [ ] rescue improves hallucinated answers more than controls
-  - Current status: no FP rescue through alpha 8 with last-token steering
+  - Current status: the strongest clean local rescue remains at `L32`, where question/object-conditioned TN directions still beat reverse logistic after expansion to `64` FP samples and random control stays clean; however decoded-answer rescue is still only `3/64` and concentrated on borderline `popular` samples
 
 ### Claim 7: “The structure is partially interpretable.”
 - [ ] some singular directions map to coherent vocabulary themes

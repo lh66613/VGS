@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -15,7 +16,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
 
-from vgs.artifacts import load_hidden_layer, load_svd, read_jsonl
+from vgs.artifacts import load_condition_hidden_layer, load_hidden_layer, load_svd, read_jsonl
 from vgs.io import ensure_dir, write_csv
 from vgs.llava_hf import build_pope_prompt, _move_inputs
 from vgs.pope import classify_outcome, parse_yes_no
@@ -151,13 +152,24 @@ def run_intervention_pilot(
     outcomes: list[str],
     families: list[str],
     granularities: list[str],
+    condition_plan_path: str | Path = "outputs/stage_b/stage_b_condition_plan.jsonl",
+    condition_hidden_dir: str | Path = "outputs/stage_b_hidden",
 ) -> dict[str, Any]:
     ensure_dir(output_dir)
     rng = np.random.default_rng(seed)
     selected = _select_pilot_rows(prediction_rows, rng, max_samples_per_outcome, outcomes)
     rows = []
     for layer in tqdm(layers, desc="intervention pilot layers", unit="layer"):
-        vectors = _intervention_vectors(layer, svd_dir, hidden_states_dir, prediction_rows, tail_band, seed)
+        vectors = _intervention_vectors(
+            layer,
+            svd_dir,
+            hidden_states_dir,
+            prediction_rows,
+            tail_band,
+            seed,
+            condition_plan_path,
+            condition_hidden_dir,
+        )
         for sample in tqdm(selected, desc=f"L{layer} intervention samples", unit="sample", leave=False):
             baseline_text = _generate_with_optional_intervention(
                 model,
@@ -189,12 +201,15 @@ def run_intervention_pilot(
                     baseline_logits,
                     processor,
                 )
-            )
+                )
             for spec_name, vector in vectors.items():
+                sample_payload = _resolve_sample_payload(vector, str(sample.get("sample_id")))
+                if sample_payload is None:
+                    continue
                 for alpha in alpha_grid:
                     if _skip_spec(spec_name, sample.get("outcome"), families):
                         continue
-                    payload = _to_device_payload(vector, device)
+                    payload = _to_device_payload(sample_payload, device)
                     for granularity in granularities:
                         intervention = _make_intervention(spec_name, payload, float(alpha))
                         logits = _next_token_logits_with_optional_intervention(
@@ -251,6 +266,8 @@ def run_intervention_pilot(
         "outcomes": outcomes,
         "families": families,
         "granularities": granularities,
+        "condition_plan_path": str(condition_plan_path),
+        "condition_hidden_dir": str(condition_hidden_dir),
     }
 
 
@@ -399,6 +416,8 @@ def _intervention_vectors(
     prediction_rows: list[dict[str, Any]],
     tail_band: tuple[int, int],
     seed: int,
+    condition_plan_path: str | Path,
+    condition_hidden_dir: str | Path,
 ) -> dict[str, np.ndarray]:
     basis = load_svd(svd_dir, layer)["Vh"].float().numpy().T
     start, end = tail_band
@@ -427,15 +446,27 @@ def _intervention_vectors(
     hidden = load_hidden_layer(hidden_states_dir, layer)
     sample_ids = [str(sample_id) for sample_id in hidden["sample_ids"]]
     keep = [idx for idx, sample_id in enumerate(sample_ids) if sample_id in labels_by_id]
-    y = np.array([labels_by_id[sample_ids[idx]] for idx in keep], dtype=np.int64)
+    kept_sample_ids = [sample_ids[idx] for idx in keep]
+    y = np.array([labels_by_id[sample_id] for sample_id in kept_sample_ids], dtype=np.int64)
     diff = hidden["z_blind"][keep].float().numpy() - hidden["z_img"][keep].float().numpy()
     scaler = StandardScaler()
     x_scaled = scaler.fit_transform(diff)
     logistic = LogisticRegression(max_iter=2000, class_weight="balanced", random_state=seed)
     logistic.fit(x_scaled, y)
+    random_direction = _random_direction(basis.shape[0], seed + layer + 202)
     vectors["reduce_logistic_fp_score"] = {
         "mode": "signed_vector",
         "direction": _unit_vector(logistic.coef_[0] / np.maximum(scaler.scale_, 1e-12)),
+        "sign": 1.0,
+    }
+    vectors["reverse_logistic_fp_direction"] = {
+        "mode": "signed_vector",
+        "direction": _unit_vector(logistic.coef_[0] / np.maximum(scaler.scale_, 1e-12)),
+        "sign": -1.0,
+    }
+    vectors["random_rescue_control"] = {
+        "mode": "signed_vector",
+        "direction": random_direction,
         "sign": 1.0,
     }
     lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
@@ -444,6 +475,11 @@ def _intervention_vectors(
         "mode": "signed_vector",
         "direction": _unit_vector(lda.coef_[0] / np.maximum(scaler.scale_, 1e-12)),
         "sign": 1.0,
+    }
+    vectors["reverse_lda_fp_direction"] = {
+        "mode": "signed_vector",
+        "direction": _unit_vector(lda.coef_[0] / np.maximum(scaler.scale_, 1e-12)),
+        "sign": -1.0,
     }
     tn_indices = [idx for idx, sample_id in enumerate(sample_ids) if outcomes_by_id.get(sample_id) == "TN"]
     fp_indices = [idx for idx, sample_id in enumerate(sample_ids) if outcomes_by_id.get(sample_id) == "FP"]
@@ -463,7 +499,156 @@ def _intervention_vectors(
             "direction": _unit_vector(fp_d),
             "sign": 1.0,
         }
+    vectors.update(
+        _local_rescue_vectors(
+            layer=layer,
+            prediction_rows=prediction_rows,
+            sample_ids=kept_sample_ids,
+            diff=diff,
+            x_scaled=x_scaled,
+            y=y,
+            condition_plan_path=condition_plan_path,
+            condition_hidden_dir=condition_hidden_dir,
+        )
+    )
     return vectors
+
+
+def _local_rescue_vectors(
+    layer: int,
+    prediction_rows: list[dict[str, Any]],
+    sample_ids: list[str],
+    diff: np.ndarray,
+    x_scaled: np.ndarray,
+    y: np.ndarray,
+    condition_plan_path: str | Path,
+    condition_hidden_dir: str | Path,
+) -> dict[str, Any]:
+    rows_by_id = {str(row["sample_id"]): row for row in prediction_rows}
+    index_by_id = {sample_id: idx for idx, sample_id in enumerate(sample_ids)}
+    tn_mask = y == 0
+    fp_mask = y == 1
+    tn_indices = np.flatnonzero(tn_mask)
+    fp_indices = np.flatnonzero(fp_mask)
+    if len(tn_indices) == 0 or len(fp_indices) == 0:
+        return {}
+
+    question_to_tn: dict[str, list[np.ndarray]] = {}
+    object_to_tn: dict[str, list[np.ndarray]] = {}
+    for idx in tn_indices:
+        sample_id = sample_ids[idx]
+        row = rows_by_id.get(sample_id, {})
+        question_key = _normalize_question_text(str(row.get("question", "")))
+        question_to_tn.setdefault(question_key, []).append(diff[idx])
+        object_key = _extract_pope_object(str(row.get("question", "")))
+        if object_key:
+            object_to_tn.setdefault(object_key, []).append(diff[idx])
+
+    local_knn_vectors: dict[str, Any] = {}
+    question_vectors: dict[str, Any] = {}
+    object_vectors: dict[str, Any] = {}
+    for idx in fp_indices:
+        sample_id = sample_ids[idx]
+        row = rows_by_id.get(sample_id, {})
+        fp_scaled = x_scaled[idx]
+        distances = np.linalg.norm(x_scaled[tn_indices] - fp_scaled, axis=1)
+        nearest_count = min(8, len(tn_indices))
+        nearest = tn_indices[np.argsort(distances)[:nearest_count]]
+        local_knn_vectors[sample_id] = {
+            "mode": "signed_vector",
+            "direction": _unit_vector(diff[nearest].mean(axis=0)),
+            "sign": -1.0,
+        }
+
+        question_key = _normalize_question_text(str(row.get("question", "")))
+        question_group = question_to_tn.get(question_key, [])
+        if question_group:
+            question_vectors[sample_id] = {
+                "mode": "signed_vector",
+                "direction": _unit_vector(np.mean(question_group, axis=0)),
+                "sign": -1.0,
+            }
+
+        object_key = _extract_pope_object(str(row.get("question", "")))
+        object_group = object_to_tn.get(object_key, []) if object_key else []
+        if object_group:
+            object_vectors[sample_id] = {
+                "mode": "signed_vector",
+                "direction": _unit_vector(np.mean(object_group, axis=0)),
+                "sign": -1.0,
+            }
+
+    matched_random_vectors, matched_adv_vectors = _load_local_condition_templates(
+        layer,
+        condition_plan_path,
+        condition_hidden_dir,
+    )
+    vectors: dict[str, Any] = {
+        "local_knn_tn_correction": {
+            "mode": "sample_lookup",
+            "vectors": local_knn_vectors,
+        },
+        "question_tn_correction": {
+            "mode": "sample_lookup",
+            "vectors": question_vectors,
+        },
+        "object_tn_correction": {
+            "mode": "sample_lookup",
+            "vectors": object_vectors,
+        },
+    }
+    if matched_random_vectors:
+        vectors["local_matched_minus_random"] = {
+            "mode": "sample_lookup",
+            "vectors": matched_random_vectors,
+        }
+    if matched_adv_vectors:
+        vectors["local_matched_minus_adversarial"] = {
+            "mode": "sample_lookup",
+            "vectors": matched_adv_vectors,
+        }
+    return vectors
+
+
+def _load_local_condition_templates(
+    layer: int,
+    condition_plan_path: str | Path,
+    condition_hidden_dir: str | Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    condition_path = Path(condition_plan_path)
+    hidden_dir = Path(condition_hidden_dir)
+    if not condition_path.exists():
+        return {}, {}
+    try:
+        payload = load_condition_hidden_layer(hidden_dir, layer)
+    except FileNotFoundError:
+        return {}, {}
+    sample_ids = [str(sample_id) for sample_id in payload["sample_ids"]]
+    conditions = payload["conditions"]
+    matched = conditions.get("matched")
+    random_mismatch = conditions.get("random_mismatch")
+    adversarial_mismatch = conditions.get("adversarial_mismatch")
+    if matched is None:
+        return {}, {}
+
+    random_vectors: dict[str, Any] = {}
+    adversarial_vectors: dict[str, Any] = {}
+    for idx, sample_id in enumerate(sample_ids):
+        if random_mismatch is not None:
+            direction = matched[idx].float().numpy() - random_mismatch[idx].float().numpy()
+            random_vectors[sample_id] = {
+                "mode": "signed_vector",
+                "direction": _unit_vector(direction),
+                "sign": 1.0,
+            }
+        if adversarial_mismatch is not None:
+            direction = matched[idx].float().numpy() - adversarial_mismatch[idx].float().numpy()
+            adversarial_vectors[sample_id] = {
+                "mode": "signed_vector",
+                "direction": _unit_vector(direction),
+                "sign": 1.0,
+            }
+    return random_vectors, adversarial_vectors
 
 
 def _to_device_payload(payload: Any, device: str) -> Any:
@@ -474,6 +659,12 @@ def _to_device_payload(payload: Any, device: str) -> Any:
         }
     if isinstance(payload, np.ndarray):
         return torch.as_tensor(payload, device=device)
+    return payload
+
+
+def _resolve_sample_payload(payload: Any, sample_id: str) -> Any:
+    if isinstance(payload, dict) and payload.get("mode") == "sample_lookup":
+        return payload.get("vectors", {}).get(sample_id)
     return payload
 
 
@@ -534,9 +725,17 @@ def _skip_spec(spec_name: str, outcome: str | None, families: list[str]) -> bool
     }
     rescue_specs = {
         "reduce_logistic_fp_score",
+        "reverse_logistic_fp_direction",
         "reduce_lda_fp_score",
+        "reverse_lda_fp_direction",
         "add_tn_correction",
         "subtract_fp_shift",
+        "random_rescue_control",
+        "local_knn_tn_correction",
+        "question_tn_correction",
+        "object_tn_correction",
+        "local_matched_minus_random",
+        "local_matched_minus_adversarial",
     }
     if spec_name in tail_specs and "tail" not in families:
         return True
@@ -628,6 +827,11 @@ def _random_basis(dim: int, k: int, seed: int) -> np.ndarray:
     return q[:, :k]
 
 
+def _random_direction(dim: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return _unit_vector(rng.normal(size=dim))
+
+
 def _orthogonal_random_basis(dim: int, forbidden_basis: np.ndarray, k: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     random_matrix = rng.normal(size=(dim, k))
@@ -642,3 +846,15 @@ def _unit_vector(vector: np.ndarray) -> np.ndarray:
     if norm <= 1e-12:
         return vector
     return vector / norm
+
+
+def _normalize_question_text(question: str) -> str:
+    return re.sub(r"\s+", " ", question.strip().lower())
+
+
+def _extract_pope_object(question: str) -> str:
+    text = _normalize_question_text(question)
+    match = re.match(r"is there a[n]?\s+(.+?)\s+in the image\??$", text)
+    if not match:
+        return ""
+    return match.group(1).strip()

@@ -587,6 +587,8 @@ def intervention_pilot_main() -> None:
     parser.add_argument("--allow-cpu", action="store_true")
     parser.add_argument("--svd-dir", default="outputs/svd")
     parser.add_argument("--hidden-states-dir", default="outputs/hidden_states")
+    parser.add_argument("--condition-plan", default="outputs/stage_b/stage_b_condition_plan.jsonl")
+    parser.add_argument("--condition-hidden-dir", default="outputs/stage_b_hidden")
     parser.add_argument("--predictions", default="outputs/predictions/pope_predictions.jsonl")
     parser.add_argument("--output-dir", default="outputs/interventions")
     args = parser.parse_args()
@@ -609,6 +611,8 @@ def intervention_pilot_main() -> None:
         "granularities": args.granularities,
         "svd_dir": args.svd_dir,
         "hidden_states_dir": args.hidden_states_dir,
+        "condition_plan": args.condition_plan,
+        "condition_hidden_dir": args.condition_hidden_dir,
         "predictions": args.predictions,
         "device": args.device,
         "torch_dtype": torch_dtype,
@@ -643,6 +647,8 @@ def intervention_pilot_main() -> None:
                 args.outcomes,
                 args.families,
                 args.granularities,
+                args.condition_plan,
+                args.condition_hidden_dir,
             )
         )
     _finish(
