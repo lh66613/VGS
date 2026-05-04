@@ -262,6 +262,604 @@ Status:
 
 - Completed. See the Stage B analysis section below.
 
+## 2026-04-24 Extended TODO Stage I/J Preparation
+
+Prepared scripts:
+
+- Protocol lock: `scripts/prepare_stage_i_protocol.py`
+- Destructive controls: `scripts/analyze_stage_j_controls.py`
+- Convenience wrappers:
+  - `scripts/run_cpu_stage_i.sh`
+  - `scripts/run_cpu_stage_j_controls.sh`
+
+Stage I artifacts:
+
+- Fixed split IDs:
+  - `outputs/splits/pope_train_ids.json`
+  - `outputs/splits/pope_val_ids.json`
+  - `outputs/splits/pope_test_ids.json`
+- Split summary: `outputs/splits/split_summary.csv`
+- Protocol notes: `notes/protocol_lock.md`
+- Prompt notes: `notes/prompt_templates.md`
+- Prompt diff: `outputs/sanity_checks/prompt_template_diff.txt`
+- Hidden readout notes: `notes/hidden_readout_protocol.md`
+
+Default split:
+
+- Seed: 42
+- Stratification: subset / label / outcome
+- Train / val / test: 6300 / 1350 / 1350
+
+Stage J prepared analysis:
+
+- Destructive matrix controls: real matched, image-shuffled, blind-shuffled, Gaussian mean/variance matched.
+- Probe controls: FP-vs-TN probes for full difference, full SVD coordinates, and top-K SVD coordinates.
+- Label control: shuffled FP/TN labels on the real matched difference.
+- Random subspace controls: random orthogonal K-subspaces, random SVD bands, PCA on `z_img`, and PCA on `z_blind`.
+- Output targets:
+  - `outputs/stage_j_controls/shuffle_spectrum_summary.csv`
+  - `outputs/stage_j_controls/shuffle_probe_summary.csv`
+  - `outputs/stage_j_controls/shuffle_stability_summary.csv`
+  - `outputs/stage_j_controls/random_subspace_control.csv`
+
+Smoke validation:
+
+- Smoke inputs: `outputs/predictions/stage_j_smoke_predictions.jsonl`, `outputs/hidden_states_stage_j_smoke/`
+- Smoke Stage J outputs: `outputs/stage_j_smoke/`
+- Smoke plots: `outputs/plots_stage_j_smoke/`
+
+## 2026-04-25 Stage J Destructive Controls
+
+Artifacts:
+
+- Spectrum controls: `outputs/stage_j_controls/shuffle_spectrum_summary.csv`
+- Probe controls: `outputs/stage_j_controls/shuffle_probe_summary.csv`
+- Stability controls: `outputs/stage_j_controls/shuffle_stability_summary.csv`
+- Random subspace controls: `outputs/stage_j_controls/random_subspace_control.csv`
+- Plots:
+  - `outputs/plots/stage_j_real_vs_shuffle_spectrum.png`
+  - `outputs/plots/stage_j_real_vs_shuffle_auroc.png`
+  - `outputs/plots/stage_j_random_subspace_boxplot.png`
+
+Protocol:
+
+- Layers: L20 / L24 / L32
+- Split-locked setup: SVD/spectrum/stability estimated on `outputs/splits/pope_train_ids.json`; FP-vs-TN probes trained on train IDs and evaluated on `outputs/splits/pope_test_ids.json`.
+- Train/test FP-vs-TN probe sizes: 3150 / 675.
+
+Spectrum controls:
+
+- Real matched differences are sharply low-rank compared with Gaussian mean/variance-matched controls.
+- However, image-shuffled and blind-shuffled differences have almost the same singular spectrum as real matched differences.
+- Effective rank for real vs image-shuffled / blind-shuffled:
+  - L20: 639.6 vs 646.0 / 642.5
+  - L24: 616.4 vs 615.9 / 619.0
+  - L32: 703.4 vs 704.2 / 705.7
+- Explained variance at K=4 is also nearly unchanged by image/blind shuffle:
+  - L20: real 0.8406, image-shuffle 0.8427, blind-shuffle 0.8402
+  - L24: real 0.8762, image-shuffle 0.8771, blind-shuffle 0.8757
+  - L32: real 0.7254, image-shuffle 0.7282, blind-shuffle 0.7249
+- Interpretation: the dominant low-rank backbone is not sufficient evidence of sample-paired visual grounding. It likely includes broad modality/prompt geometry that survives destructive pairing.
+
+Probe controls:
+
+| Layer | Real full SVD | Image shuffle | Blind shuffle | Gaussian | Label shuffle |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 20 | 0.6064 | 0.5256 | 0.6524 | 0.5702 | 0.5079 |
+| 24 | 0.6837 | 0.5150 | 0.6168 | 0.4995 | 0.4977 |
+| 32 | 0.6766 | 0.5015 | 0.6425 | 0.4764 | 0.4487 |
+
+- Label-shuffled probes collapse close to chance, supporting that the FP/TN signal is label-linked rather than a pure classifier artifact.
+- Image-shuffled and Gaussian controls are much weaker than real matched at L24/L32.
+- Blind-shuffled controls remain nontrivial, especially L20 and L32, so the current destructive control does not support a clean “only correctly paired image evidence matters” claim.
+
+Random subspace controls:
+
+- Plain SVD top-K does not consistently dominate matched random orthogonal K-subspaces.
+- For K=256, AUROC is:
+  - L20: SVD 0.6094 vs random orthogonal mean 0.6160
+  - L24: SVD 0.6290 vs random orthogonal mean 0.6038
+  - L32: SVD 0.5891 vs random orthogonal mean 0.5920
+- PCA on `z_blind` is surprisingly strong across layers and K, often stronger than plain SVD top-K.
+- Interpretation: FP/TN information is distributed and partly present in blind/text-side representations. Plain SVD top-K should not be framed as uniquely capturing the discriminative geometry.
+
+Current Stage J conclusion:
+
+- Strongly supported: real blind-image differences are non-Gaussian, stable, and contain FP/TN signal.
+- Not supported: real matched differences have a uniquely sharper spectrum than image/blind-shuffled pairings.
+- Partly supported: real matched geometry improves over image-shuffled/Gaussian controls for L24/L32 FP-vs-TN probing.
+- Required wording adjustment: use “paired correction geometry contains hallucination-relevant residual information” rather than “the low-rank backbone itself proves paired visual grounding.”
+
+## 2026-04-25 Stage K Preparation
+
+Prepared code:
+
+- Added readout support in `src/vgs/llava_hf.py`:
+  - `last_prompt_token`
+  - `first_answer_prefill` (implemented as the causal prefill state at the last prompt token)
+  - `last_4_prompt_mean`
+  - `last_8_prompt_mean`
+- GPU dump wrapper: `scripts/run_gpu_stage_k_positions.sh`
+- CPU analysis script: `scripts/analyze_stage_k_positions.py`
+- CPU wrapper after GPU dump: `scripts/run_cpu_stage_k_positions.sh`
+
+Planned GPU command:
+
+```bash
+PYTHON_BIN=/data/lh/.conda/envs/after/bin/python scripts/run_gpu_stage_k_positions.sh
+```
+
+After GPU artifacts are available under `outputs/stage_k_hidden/{position}/`, run:
+
+```bash
+PYTHON_BIN=/data/lh/.conda/envs/after/bin/python scripts/run_cpu_stage_k_positions.sh
+```
+
+Expected Stage K outputs:
+
+- `outputs/stage_k_positions/position_probe_summary.csv`
+- `outputs/stage_k_positions/position_spectrum_summary.csv`
+- `outputs/plots/stage_k_position_layer_heatmap.png`
+
+Additional Stage K condition-geometry scripts:
+
+- GPU condition dump: `scripts/run_gpu_stage_k_conditions.sh`
+- CPU SVD preparation for position-specific bases: `scripts/run_cpu_stage_k_svd.sh`
+- CPU matched/mismatch geometry analysis: `scripts/run_cpu_stage_k_conditions.sh`
+- Position-specific SVD bases have been prepared under `outputs/stage_k_svd/{position}/`.
+
+Status:
+
+- Program and scripts are ready.
+- GPU hidden-state extraction completed by user.
+
+## 2026-04-25 Stage K Token-Position Robustness
+
+Artifacts:
+
+- Hidden states: `outputs/stage_k_hidden/{last_prompt_token,first_answer_prefill,last_4_prompt_mean,last_8_prompt_mean}/layer_{16,20,24,32}.pt`
+- Spectrum summary: `outputs/stage_k_positions/position_spectrum_summary.csv`
+- Probe summary: `outputs/stage_k_positions/position_probe_summary.csv`
+- Plot: `outputs/plots/stage_k_position_layer_heatmap.png`
+- Readout decision: `notes/readout_position_decision.md`
+
+Setup:
+
+- Layers: L16 / L20 / L24 / L32
+- K grid: 4 / 64 / 128 / 256
+- Split-locked protocol: SVD estimated on train IDs; FP-vs-TN probes trained on train IDs and evaluated on test IDs.
+- `first_answer_prefill` is identical to `last_prompt_token` in the current implementation because the prefill hidden state is read at the last prompt token before generation.
+
+Full-difference AUROC:
+
+| Position | L16 | L20 | L24 | L32 |
+| --- | ---: | ---: | ---: | ---: |
+| last_prompt_token | 0.6595 | 0.6588 | 0.6518 | 0.6197 |
+| first_answer_prefill | 0.6595 | 0.6588 | 0.6518 | 0.6197 |
+| last_4_prompt_mean | 0.6848 | 0.7075 | 0.7108 | 0.6798 |
+| last_8_prompt_mean | 0.7094 | 0.7377 | 0.7319 | 0.7023 |
+
+Best top-K projected AUROC:
+
+| Position | Best layer | Best K | AUROC |
+| --- | ---: | ---: | ---: |
+| last_prompt_token | 24 | 128 | 0.6343 |
+| first_answer_prefill | 24 | 128 | 0.6343 |
+| last_4_prompt_mean | 24 | 128 | 0.6947 |
+| last_8_prompt_mean | 32 | 256 | 0.6791 |
+
+Spectrum observations:
+
+- `last_prompt_token` keeps the previous concentration pattern: top-4 explained variance is high in L16/L20/L24 and lower in L32.
+- `last_4_prompt_mean` remains concentrated but shifts the best discriminative layer toward L24.
+- `last_8_prompt_mean` is extremely concentrated in early/mid layers:
+  - L16 K=4 explained variance: 0.9992
+  - L20 K=4 explained variance: 0.9986
+  - L24 K=4 explained variance: 0.9969
+- Despite this near-total variance concentration, top-K AUROC at K=4 remains weak or unstable, while AUROC improves at K=128/256. This strongly preserves the “variance geometry is not the same as hallucination-discriminative geometry” conclusion.
+
+Current interpretation:
+
+- Token-position robustness is supported for the core mechanism claim: hallucination signal persists across multiple readouts.
+- Pooled prompt readouts are stronger for FP-vs-TN detection than the single last-token readout.
+- L20/L24 remain important under pooled readouts; L24 is best for `last_4_prompt_mean`, while L20/L24 full-difference are strongest under `last_8_prompt_mean`.
+- For continuity with completed Stage A/B/C/E, keep `last_prompt_token` as the primary paper readout for now and use `last_4_prompt_mean` as a robustness appendix readout.
+- Matched-vs-mismatch condition scoring under the new readouts is complete; see the next section.
+
+## 2026-04-25 Stage K Condition Geometry Across Readouts
+
+Artifacts:
+
+- Condition hidden states: `outputs/stage_k_condition_hidden/{position}/layer_{16,20,24,32}.pt`
+- Condition geometry: `outputs/stage_k_condition_geometry/{position}/`
+- Compact delta summary: `outputs/stage_k_condition_geometry/position_condition_delta_summary.csv`
+- Position-specific SVD bases: `outputs/stage_k_svd/{position}/`
+- Condition plots: `outputs/plots_stage_k_conditions/{position}/`
+
+Setup:
+
+- Positions: `last_prompt_token`, `first_answer_prefill`, `last_4_prompt_mean`, `last_8_prompt_mean`
+- Layers: L16 / L20 / L24 / L32
+- Conditions: matched / random mismatch / adversarial mismatch / blind
+- Stage B condition plan: 512 balanced FP/TN rows.
+
+Selected mean matched-minus-mismatch deltas:
+
+| Position | Top-256 matched-random | Top-256 matched-adversarial | Tail 257-1024 matched-random | Tail 257-1024 matched-adversarial | Logistic matched-random | Logistic matched-adversarial |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| last_prompt_token | -356.8 | -120.8 | 9.5 | 20.3 | 0.226 | 0.252 |
+| first_answer_prefill | -356.8 | -120.8 | 9.5 | 20.3 | 0.226 | 0.252 |
+| last_4_prompt_mean | 111.6 | 128.4 | 0.3 | 4.2 | 0.134 | 0.143 |
+| last_8_prompt_mean | 405.2 | 202.4 | -1.6 | 1.7 | 0.125 | 0.142 |
+
+Observations:
+
+- `first_answer_prefill` again exactly matches `last_prompt_token`.
+- The supervised logistic condition score separates matched from both random and adversarial mismatches for every readout.
+- The separation is largest for `last_prompt_token` / `first_answer_prefill`, smaller but still positive for `last_4_prompt_mean` and `last_8_prompt_mean`.
+- Tail band 257-1024 condition separation is strongest under `last_prompt_token`, especially L24/L32:
+  - L24 matched-adversarial mean delta: 25.69
+  - L32 matched-adversarial mean delta: 39.09
+- Pooled readouts change the top-backbone condition geometry substantially. Under `last_4_prompt_mean` and `last_8_prompt_mean`, top-256 matched-minus-mismatch deltas become mostly positive, while under `last_prompt_token` they are often negative in early/mid layers.
+
+Interpretation:
+
+- Token-position robustness is supported for evidence-sensitive condition geometry: matched-vs-mismatch separation persists in supervised decision scores across readouts.
+- The residual/tail condition geometry appears most clearly in the single-token readout, while pooled readouts improve FP/TN detection but dampen or reshape tail condition gaps.
+- This suggests two related but distinct readout regimes:
+  - pooled prompt readouts are stronger for detection;
+  - last-token residual/tail coordinates are cleaner for condition-geometry interpretation.
+
+## 2026-04-25 Stage L Evidence-Specific Subspaces
+
+Artifacts:
+
+- Probe results: `outputs/stage_l_evidence_subspace/evidence_subspace_probe.csv`
+- Condition gaps: `outputs/stage_l_evidence_subspace/evidence_subspace_condition_gap.csv`
+- Split-half stability: `outputs/stage_l_evidence_subspace/evidence_subspace_stability.csv`
+- Plot: `outputs/plots/stage_l_plain_svd_vs_evidence_specific.png`
+- Naming decision: `notes/naming_decision.md`
+
+Methods tested:
+
+- Plain SVD on matched `D`
+- Contrastive PCA: matched covariance minus mismatch covariance
+- Generalized eigenspace: matched covariance vs regularized mismatch covariance
+- Fisher FP/TN direction plus PCA completion
+- PLS FP/TN subspace
+- Matched-vs-adversarial logistic direction plus PCA completion
+
+Probe result:
+
+| Method | Best layer | Best K | Best AUROC | Notes |
+| --- | ---: | ---: | ---: | --- |
+| PLS FP/TN | 24 | 32 | 0.7196 | Best detection method |
+| Fisher FP/TN | 20 | 64 | 0.6654 | Moderate, more stable than PLS |
+| Plain SVD | 20 | 32 | 0.6103 | Stable but weak |
+| Contrastive PCA | 20 | 64 | 0.6029 | Better for condition gaps than FP/TN detection |
+| Generalized matched-vs-mismatch | 20 | 8 | 0.5798 | Weak detection in this first setup |
+| Matched-vs-adversarial logistic | 24 | 64 | 0.5757 | Weak detection despite condition objective |
+
+Mean AUROC over L20/L24/L32:
+
+| K | Plain SVD | PLS FP/TN | Fisher FP/TN | Contrastive PCA |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 | 0.5160 | 0.6224 | 0.6048 | 0.5099 |
+| 8 | 0.5600 | 0.6488 | 0.6059 | 0.5308 |
+| 16 | 0.5308 | 0.6875 | 0.6239 | 0.5604 |
+| 32 | 0.5647 | 0.6948 | 0.6256 | 0.5482 |
+| 64 | 0.5687 | 0.6949 | 0.6416 | 0.5541 |
+
+Condition-gap result:
+
+- Contrastive PCA produces the largest matched-vs-mismatch score gaps, especially at L32.
+- Example L32 contrastive PCA:
+  - K=64 matched-minus-random mean delta: 1030.3
+  - K=64 matched-minus-adversarial mean delta: 1014.4
+- This is much stronger as a condition-separation view than as an FP/TN probe.
+
+Stability:
+
+- Plain SVD remains the most stable split-half subspace:
+  - L20 K=4: 0.9947
+  - L24 K=4: 0.9945
+  - L32 K=4: 0.9955
+- Fisher and matched-vs-adversarial logistic are moderately stable.
+- PLS is best for detection but has weaker split-half subspace stability, often around 0.4-0.5.
+
+Interpretation:
+
+- Stage L supports an important split:
+  - **supervised PLS** is the strongest compact hallucination-detection subspace;
+  - **contrastive PCA** is the strongest evidence-condition separation subspace;
+  - **plain SVD** is the most stable dominant correction backbone but not the best discriminative object.
+- This strengthens the paper's layered-geometry framing: there is not a single best subspace for every role.
+- Recommended naming after Stage L: **evidence-sensitive correction geometry**, not **visual grounding subspace**.
+
+## 2026-04-25 Stage M Memory Bank Preparation
+
+Artifacts:
+
+- Memory bank: `outputs/stage_m_local_rescue/memory_bank_train.pt`
+- Retrieval audit: `outputs/stage_m_local_rescue/retrieval_audit.csv`
+- Object counts: `outputs/stage_m_local_rescue/memory_bank_object_counts.csv`
+- Build summary: `outputs/stage_m_local_rescue/build_stage_m_memory_bank_summary.json`
+
+Setup:
+
+- Layers: L20 / L24 / L32
+- Split: train only
+- Entries per layer: 6300
+- Correction vector dim: 4096
+- SVD coordinate dim: 1024
+- Tail coordinate band: 257-1024, dim 768
+
+Audit:
+
+| Layer | Entries | Unique objects | Unique images | FP | TN | TP | FN |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20 | 6300 | 79 | 500 | 244 | 2906 | 2523 | 627 |
+| 24 | 6300 | 79 | 500 | 244 | 2906 | 2523 | 627 |
+| 32 | 6300 | 79 | 500 | 244 | 2906 | 2523 | 627 |
+
+Notes:
+
+- The memory bank contains no validation/test samples.
+- It stores fields needed for same-object retrieval, SVD-coordinate kNN, tail-coordinate kNN, and nearest-TN retrieval.
+- Yes/no margins are not available in the current POPE prediction artifact; margin-based gating requires a separate logits/margin dump.
+
+Retrieval plan:
+
+- Plan CSV: `outputs/stage_m_local_rescue/retrieval_plan.csv`
+- Plan JSONL: `outputs/stage_m_local_rescue/retrieval_plan.jsonl`
+- Plan audit: `outputs/stage_m_local_rescue/retrieval_plan_audit.csv`
+- Target split: test
+- Targets per layer: 181 total = 53 FP + 64 TN + 64 TP
+- Retrieval modes:
+  - `same_object_tn`
+  - `svd_knn_tn`
+  - `tail_knn_tn`
+  - `random_tn`
+  - `same_object_fp`
+- Same-image candidates are excluded by default. The final retrieval plan has zero same-image retrieved examples for all layers and modes.
+
+## 2026-04-25 Stage M Gated Local Rescue Preparation
+
+Prepared scripts:
+
+- GPU runner: `scripts/run_gpu_stage_m_local_rescue.sh`
+- Stage M local rescue entry point: `scripts/run_stage_m_local_rescue.py`
+- CPU analysis runner: `scripts/run_cpu_stage_m_local_rescue.sh`
+- Stage M analysis entry point: `scripts/analyze_stage_m_local_rescue.py`
+
+Default GPU pilot:
+
+- Layer: L32
+- Target outcomes: FP / TN / TP
+- Max targets per outcome: 32
+- Alpha grid: 2 / 4 / 8
+- Granularity: `last_token`
+- Gates:
+  - `always`
+  - `low_abs_margin`
+  - `high_fp_risk`
+  - `margin_and_fp_risk`
+- Retrieval modes:
+  - `same_object_tn`
+  - `svd_knn_tn`
+  - `tail_knn_tn`
+  - `random_tn`
+
+Implemented steering directions:
+
+- global train-TN mean correction
+- same-object train-TN mean correction
+- SVD-kNN train-TN mean correction
+- tail-kNN train-TN mean correction
+- random train-TN retrieval control
+- local TN-minus-same-object-FP correction where same-object FP neighbors are available
+
+Implemented analysis metrics:
+
+- FP rescue rate
+- yes/no margin shift and `logit(No)-logit(Yes)` gain
+- TN and TP damage rate
+- unknown / malformed output rate
+- paired correctness changes with McNemar exact test
+- plots:
+  - `outputs/plots/stage_m_fp_margin_shift.png`
+  - `outputs/plots/stage_m_gate_tradeoff_curve.png`
+
+Dry-run:
+
+- `scripts/run_stage_m_local_rescue.py --dry-run`
+- Summary: `outputs/stage_m_local_rescue/run_stage_m_local_rescue_summary.json`
+
+Notes:
+
+- The default wrapper runs full first-token generation. Set `LOGITS_ONLY=1` for a cheaper margin-only GPU run.
+- The evidence-specific Stage L subspace direction is not yet wired into M2 steering because Stage L currently saves evaluation summaries, not reusable intervention bases.
+
+## 2026-04-25 Stage M Gated Local Rescue Result
+
+Artifacts:
+
+- Results: `outputs/stage_m_local_rescue/local_rescue_results.csv`
+- Summary: `outputs/stage_m_local_rescue/local_rescue_summary.csv`
+- Run summary: `outputs/stage_m_local_rescue/run_stage_m_local_rescue_summary.json`
+- Analysis summary: `outputs/stage_m_local_rescue/analyze_stage_m_local_rescue_summary.json`
+- Plots:
+  - `outputs/plots/stage_m_fp_margin_shift.png`
+  - `outputs/plots/stage_m_fp_margin_shift_layer_32.png`
+  - `outputs/plots/stage_m_gate_tradeoff_curve.png`
+
+Setup:
+
+- Layer: L32
+- Target samples: 32 FP / 32 TN / 32 TP
+- Alpha grid: 2 / 4 / 8
+- Granularity: `last_token`
+- Gates: `always`, `low_abs_margin`, `high_fp_risk`, `margin_and_fp_risk`
+- Retrieval modes in this run: `same_object_tn`, `svd_knn_tn`, `tail_knn_tn`, `random_tn`
+
+Baseline first-token margins:
+
+| Outcome | n | Mean yes-no margin | Median yes-no margin | Min | Max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| FP | 32 | 0.7324 | 0.6328 | 0.0156 | 2.7344 |
+| TN | 32 | -2.0103 | -2.2422 | -3.1406 | -0.2812 |
+| TP | 32 | 2.3003 | 2.6484 | 0.0781 | 4.5625 |
+
+At alpha 8:
+
+| Gate | Direction | FP n | FP rescue rate | Median gain in logit(No)-logit(Yes) |
+| --- | --- | ---: | ---: | ---: |
+| always | global TN mean | 32 | 0.0625 | 0.0781 |
+| always | same-object TN mean | 32 | 0.0625 | 0.0781 |
+| always | SVD-kNN TN mean | 32 | 0.0625 | 0.0625 |
+| always | tail-kNN TN mean | 32 | 0.0625 | 0.0469 |
+| always | random TN mean | 32 | 0.0625 | 0.0781 |
+| low_abs_margin | global TN mean | 9 | 0.2222 | 0.0781 |
+| low_abs_margin | same-object TN mean | 9 | 0.2222 | 0.0781 |
+| low_abs_margin | SVD-kNN TN mean | 9 | 0.2222 | 0.0625 |
+| low_abs_margin | tail-kNN TN mean | 9 | 0.2222 | 0.0469 |
+| low_abs_margin | random TN mean | 9 | 0.2222 | 0.0781 |
+| margin_and_fp_risk | global TN mean | 4 | 0.2500 | 0.0781 |
+| margin_and_fp_risk | same-object TN mean | 4 | 0.2500 | 0.0703 |
+| margin_and_fp_risk | SVD-kNN TN mean | 4 | 0.2500 | 0.0625 |
+| margin_and_fp_risk | tail-kNN TN mean | 4 | 0.2500 | 0.0547 |
+| margin_and_fp_risk | random TN mean | 4 | 0.2500 | 0.0859 |
+
+Damage / control observations:
+
+- TN damage is zero for all evaluated settings.
+- TP damage appears only for one very borderline TP sample at alpha 8:
+  - baseline yes-minus-no margin: `0.078125`
+  - damaged sample: `coco:popular:121`, object `bowl`
+- Under the `always` gate, global / same-object / random TN steering damage TP at `1/32 = 0.03125`; SVD-kNN and tail-kNN cause no TP damage in this run.
+- Under the `low_abs_margin` gate, global / same-object / random TN steering damage `1/3` selected TP samples; SVD-kNN and tail-kNN cause no TP damage.
+
+Rescue behavior:
+
+- There are 80 rescued intervention rows, but only 2 unique rescued FP samples:
+  - `coco:popular:2714`, object `person`, baseline yes-minus-no margin `0.015625`
+  - `coco:popular:966`, object `chair`, baseline yes-minus-no margin `0.03125`
+- This confirms the earlier Stage E pattern: steering can move the first-token boundary and sometimes flip answers, but mainly when the baseline decision is already extremely close to the yes/no boundary.
+
+Interpretation:
+
+- Stage M2 provides positive evidence for **boundary-local first-token steerability**.
+- It does not support the stronger claim that local memory-bank retrieval beats global or random TN controls.
+- The random TN retrieval control is competitive and sometimes strongest, so the current effect should not be described as retrieval-specific rescue.
+- The right writeup framing is cautious: local / global TN-like correction directions can nudge borderline hallucinated decisions, but the current implementation has not isolated a semantically specific rescue mechanism.
+
+Follow-up:
+
+- The completed run did not include `same_object_fp` in `--retrieval-modes`, so the implemented local `TN - FP` direction was not evaluated. The default Stage M GPU wrapper has been updated to include `same_object_fp` for the next run.
+- A useful next run is L32 only, same sample budget, with `same_object_fp` enabled to test whether local TN-minus-FP improves over global/random TN.
+
+## 2026-04-25 Stage M Rescue Failure Analysis
+
+Artifacts:
+
+- Taxonomy: `outputs/stage_m_local_rescue/rescue_failure_taxonomy.csv`
+- Group summary: `outputs/stage_m_local_rescue/rescue_failure_group_summary.csv`
+- Notes: `notes/rescue_failure_analysis.md`
+- Run summary: `outputs/stage_m_local_rescue/analyze_stage_m_rescue_failures_summary.json`
+
+Taxonomy over 32 FP samples:
+
+| Label | Count |
+| --- | ---: |
+| margin improved but answer unchanged | 30 |
+| rescued to correct `No` | 2 |
+| no effect | 0 |
+| damaged / malformed | 0 |
+| moved in wrong direction | 0 |
+
+Margin bins:
+
+| Baseline margin bin | Count |
+| --- | ---: |
+| `borderline_abs_le_0.25` | 9 |
+| `medium_abs_0.25_1.0` | 16 |
+| `high_abs_gt_1.0` | 7 |
+
+Rescued samples:
+
+- `coco:popular:2714`, object `person`, baseline yes-minus-no margin `0.015625`, best gain `0.109375`.
+- `coco:popular:966`, object `chair`, baseline yes-minus-no margin `0.031250`, best gain `0.093750`.
+
+Subset pattern:
+
+- Both rescued samples are from `popular`.
+- No sampled `adversarial` or `random` FP case was rescued in this L32 run.
+
+Failure profile:
+
+- Unrescued but margin-improved FP samples have median baseline margin `0.656250`.
+- Rescued FP samples have median baseline margin `0.023438`.
+- This strongly supports the boundary-local interpretation: the intervention often nudges the first-token margin in the right direction, but only extremely low-margin hallucinations cross the decision boundary.
+
+Interpretation:
+
+- Stage M3 supports the claim that first-token rescue is mainly a borderline-decision phenomenon.
+- It partly supports the claim that failures are high-confidence language-prior hallucinations: high-margin FP cases remain unrescued, but many medium-margin cases also receive small positive nudges.
+- It does not support the stronger claim that local memory directions are necessary for rescue, because the current L32 run still shows competitive global/random TN controls.
+
+## 2026-04-25 Stage N External Benchmark Preparation
+
+Decision:
+
+- Use **AMBER discriminative** as the first external benchmark.
+- Rationale recorded in `notes/external_benchmark_choice.md`.
+
+Prepared scripts:
+
+- AMBER plan preparation: `scripts/prepare_stage_n_amber.py`
+- CPU wrapper for AMBER preparation: `scripts/run_cpu_stage_n_amber_prepare.sh`
+- AMBER LLaVA yes/no evaluation: `scripts/run_stage_n_amber_eval.py`
+- GPU wrapper for AMBER evaluation + hidden dump: `scripts/run_gpu_stage_n_amber.sh`
+- Zero-shot POPE-SVD transfer analysis: `scripts/analyze_stage_n_external_transfer.py`
+- CPU wrapper for transfer analysis: `scripts/run_cpu_stage_n_transfer.sh`
+
+Dry-runs:
+
+- `DRY_RUN=1 scripts/run_cpu_stage_n_amber_prepare.sh`
+- `scripts/run_stage_n_amber_eval.py --dry-run`
+
+Planned local data layout:
+
+- Queries: `data/amber/data/query/query_discriminative.json`
+- Annotations: `data/amber/data/annotations.json`
+- Images: `data/amber/image/AMBER_*.jpg`
+
+Protocol:
+
+- Prepare AMBER rows with `id`, image path, query, truth label, and AMBER dimension.
+- Run LLaVA-1.5-7B yes/no prediction on AMBER.
+- Dump paired image/blind hidden states using the same `last_prompt_token` protocol as POPE.
+- Apply POPE SVD bases directly to AMBER hidden differences; do not refit subspaces on AMBER.
+- Report transfer scores by AMBER dimension and by feature family: full diff norm, top-SVD energy, and tail energy.
+
+Current blocker:
+
+- AMBER data/images are now present locally.
+- The default preparation wrapper now creates a balanced pilot plan with `MAX_PER_DIMENSION_LABEL=300`.
+- Current pilot plan:
+  - Rows: 1500
+  - Attribute: 300 yes / 300 no
+  - Existence: 300 no
+  - Relation: 300 yes / 300 no
+  - Missing images: 0
+  - Invalid labels: 0
+- Use `FULL=1 scripts/run_cpu_stage_n_amber_prepare.sh` to regenerate the full 14216-row discriminative plan.
+
+Next commands:
+  - `scripts/run_cpu_stage_n_amber_prepare.sh`
+  - `scripts/run_gpu_stage_n_amber.sh`
+  - `scripts/run_cpu_stage_n_transfer.sh`
+
 ## 2026-04-23 Stage B Condition Geometry Analysis
 
 Artifacts:
@@ -1393,3 +1991,455 @@ This makes the overall mechanism story stronger because it is more honest:
 - Stage C/B/E provide the behavioral and causal evidence
 - Stage G explains what the geometry seems to be about
 - Stage G alone should not be used as a detector claim
+
+## 2026-04-25 Stage N AMBER External Pilot
+
+We ran the first external-validity check on the AMBER discriminative subset, using the local AMBER layout under `data/amber/`.
+
+Artifacts:
+
+- AMBER pilot plan: `outputs/stage_n_external/amber_discriminative_plan.jsonl`
+- AMBER predictions: `outputs/stage_n_external/amber_predictions.jsonl`
+- Official-eval formatted responses: `outputs/stage_n_external/amber_responses_for_official_eval.json`
+- Hidden states: `outputs/stage_n_external/amber_hidden/layer_{20,24,32}.pt`
+- Transfer scores: `outputs/stage_n_external/external_transfer_scores.csv`
+- Per-category summary: `outputs/stage_n_external/external_category_summary.csv`
+- Plot: `outputs/plots/stage_n_external_transfer.png`
+
+Pilot setup:
+
+- Samples: 1500 AMBER discriminative questions.
+- Dimensions: `attribute`, `existence`, and `relation`.
+- Sampling cap: `MAX_PER_DIMENSION_LABEL=300`.
+- Hidden-state layers: L20 / L24 / L32.
+- External analysis uses POPE-estimated geometry without refitting on AMBER.
+
+AMBER prediction quality:
+
+| Dimension | N | Accuracy | Notes |
+| --- | ---: | ---: | --- |
+| attribute | 600 | 0.775 | 75 FP, 60 FN |
+| existence | 300 | 0.883 | 35 FP, no positive-label rows in this pilot |
+| relation | 600 | 0.743 | 29 FP, 125 FN |
+| overall | 1500 | 0.784 | pilot aggregate |
+
+Transfer result:
+
+The first energy-only SVD features transferred weakly, but the updated analysis added POPE-train FP/TN logistic probes over POPE SVD coordinates and applied those probes zero-shot to AMBER. These POPE-trained risk scores show above-chance transfer.
+
+Strongest AMBER FP-risk rows:
+
+| Layer | Dimension | Feature | FP AUROC | FP AUPRC |
+| ---: | --- | --- | ---: | ---: |
+| 20 | existence | `pope_probe_top_4_fp_risk` | 0.771 | 0.323 |
+| 20 | existence | `evidence_fisher_fp_tn_k4_fp_risk` | 0.724 | 0.248 |
+| 24 | existence | `evidence_fisher_fp_tn_k4_fp_risk` | 0.716 | 0.229 |
+| 24 | relation | `pope_probe_top_256_fp_risk` | 0.700 | 0.179 |
+| 24 | existence | `pope_probe_top_4_fp_risk` | 0.680 | 0.202 |
+| 24 | attribute | `evidence_fisher_fp_tn_k64_fp_risk` | 0.644 | 0.189 |
+| 24 | relation | `evidence_fisher_fp_tn_k64_fp_risk` | 0.644 | 0.103 |
+| 20 | attribute | `evidence_pls_fp_tn_k64_fp_risk` | 0.641 | 0.183 |
+| 24 | attribute | `pope_probe_top_256_fp_risk` | 0.632 | 0.205 |
+| 20 | relation | `pope_probe_top_256_fp_risk` | 0.632 | 0.106 |
+
+Evidence-specific transfer:
+
+- PLS FP/TN and Fisher FP/TN bases were exported to `outputs/stage_n_external/evidence_transfer_bases/layer_{20,24,32}.pt`.
+- These bases were trained/estimated from POPE only and applied zero-shot to AMBER.
+- Evidence-specific FP-risk scores transfer above chance:
+  - L20 existence Fisher K=4: FP AUROC 0.724
+  - L24 existence Fisher K=4: FP AUROC 0.716
+  - L24 attribute Fisher K=64: FP AUROC 0.644
+  - L24 relation Fisher K=64: FP AUROC 0.644
+  - L20 attribute PLS K=64: FP AUROC 0.641
+- This is stronger than raw SVD-energy transfer, but it does not beat the best POPE top-SVD coordinate probe in the current pilot.
+
+Current interpretation:
+
+- POPE-trained FP/TN decision geometry does transfer beyond POPE on this AMBER pilot.
+- The transfer is strongest for existence, but relation and attribute are not zero-signal.
+- This supports an external-validity claim for POPE-trained correction geometry, not merely for POPE-specific labels.
+- The current pilot does **not** support the stronger claim that tail/residual transfer is better than top-SVD/top-probe transfer on AMBER.
+- POPE evidence-specific Stage L bases also transfer above chance, but their advantage over plain SVD depends on the comparison: they beat raw SVD energy, not the strongest SVD-coordinate FP-risk probe.
+
+Recommended next step:
+
+- Run the full AMBER discriminative set using the separately prepared full plan under `outputs/stage_n_external_full/`. The plan has 14216 rows, no missing images, and no invalid labels.
+- Suggested GPU command: `OUTPUT_DIR=outputs/stage_n_external_full scripts/run_gpu_stage_n_amber.sh`.
+- After GPU finishes, run: `OUTPUT_DIR=outputs/stage_n_external_full scripts/run_cpu_stage_n_transfer.sh`.
+
+## 2026-04-27 Stage N Full AMBER External Result
+
+The full AMBER discriminative run completed under `outputs/stage_n_external_full/`.
+
+Artifacts:
+
+- Full plan: `outputs/stage_n_external_full/amber_discriminative_plan.jsonl`
+- Predictions: `outputs/stage_n_external_full/amber_predictions.jsonl`
+- Hidden states: `outputs/stage_n_external_full/amber_hidden/layer_{20,24,32}.pt`
+- Transfer scores: `outputs/stage_n_external_full/external_transfer_scores.csv`
+- Summary: `outputs/stage_n_external_full/external_category_summary.csv`
+- Evidence-specific bases: `outputs/stage_n_external_full/evidence_transfer_bases/layer_{20,24,32}.pt`
+
+Full AMBER prediction quality:
+
+| Dimension | N | Accuracy | Outcomes |
+| --- | ---: | ---: | --- |
+| attribute | 7628 | 0.798 | 3044 TP / 3044 TN / 770 FP / 770 FN |
+| existence | 4924 | 0.878 | 4325 TN / 599 FP |
+| relation | 1664 | 0.712 | 552 TP / 632 TN / 57 FP / 423 FN |
+| overall | 14216 | 0.816 | 3596 TP / 8001 TN / 1426 FP / 1193 FN |
+
+Strongest full-AMBER FP-risk rows:
+
+| Layer | Dimension | Feature | FP AUROC | FP AUPRC |
+| ---: | --- | --- | ---: | ---: |
+| 24 | relation | `evidence_fisher_fp_tn_k64_fp_risk` | 0.665 | 0.075 |
+| 24 | relation | `pope_probe_top_256_fp_risk` | 0.664 | 0.098 |
+| 24 | existence | `pope_probe_top_64_fp_risk` | 0.663 | 0.207 |
+| 20 | existence | `pope_probe_top_4_fp_risk` | 0.661 | 0.257 |
+| 24 | existence | `evidence_fisher_fp_tn_k16_fp_risk` | 0.657 | 0.188 |
+| 24 | attribute | `evidence_pls_fp_tn_k8_fp_risk` | 0.633 | 0.150 |
+| 24 | attribute | `evidence_fisher_fp_tn_k64_fp_risk` | 0.629 | 0.149 |
+
+Interpretation:
+
+- Full AMBER confirms above-chance transfer, but the pilot overestimated the peak AUROC.
+- The strongest layer is now consistently L24 across relation, existence, and attribute summaries.
+- Evidence-specific Fisher/PLS transfer remains competitive and sometimes best, especially for relation and attribute.
+- Raw energy-style scores remain weak: the best tail-energy FP AUROC is L20 existence at 0.561.
+- This makes the external claim more conservative but stronger statistically: POPE-trained risk geometry transfers modestly beyond POPE, while raw SVD/tail energy alone is not a strong external detector.
+
+## 2026-04-27 Stage P Multi-Seed Robustness
+
+We ran Stage P probe robustness on POPE FP-vs-TN detection.
+
+Artifacts:
+
+- Per-seed rows: `outputs/stage_p_stats/multiseed_probe_rows.csv`
+- Summary: `outputs/stage_p_stats/multiseed_probe_summary.csv`
+- Layer ranks: `outputs/stage_p_stats/multiseed_layer_rank.csv`
+- Paired bootstrap tests: `outputs/stage_p_stats/significance_tests.csv`
+- Protocol note: `notes/statistical_testing_protocol.md`
+
+Setup:
+
+- Layers: L16 / L20 / L24 / L32
+- Seeds: 13 / 17 / 23 / 29 / 31
+- Split: stratified FP/TN, test fraction 0.3
+- Features: full difference, top-4/top-64/top-256 SVD coordinates, tail 257-1024
+
+Main multi-seed AUROC:
+
+| Layer | Feature | Mean AUROC | Std | 95% CI |
+| ---: | --- | ---: | ---: | --- |
+| 24 | full_diff | 0.721 | 0.027 | 0.699-0.741 |
+| 20 | full_diff | 0.720 | 0.028 | 0.696-0.741 |
+| 16 | full_diff | 0.714 | 0.019 | 0.699-0.727 |
+| 32 | full_diff | 0.703 | 0.021 | 0.685-0.717 |
+| 20 | top_256 | 0.677 | 0.035 | 0.653-0.706 |
+| 32 | tail_257_1024 | 0.667 | 0.028 | 0.646-0.686 |
+| 24 | tail_257_1024 | 0.656 | 0.046 | 0.622-0.691 |
+| 24 | top_4 | 0.471 | 0.007 | 0.466-0.476 |
+
+Rank stability:
+
+- `full_diff` is the top-ranked feature in all 5 seeds for L16, L20, L24, and L32.
+
+Paired bootstrap conclusions:
+
+- `top_256` is significantly stronger than `top_4` at all tested layers.
+- `tail_257_1024` is significantly stronger than `top_4` at all tested layers.
+- `full_diff` is significantly stronger than both `top_256` and `tail_257_1024` at all tested layers.
+- Example deltas:
+  - L24 `top_256 - top_4`: +0.193 AUROC, 95% CI 0.155-0.227
+  - L24 `full_diff - top_256`: +0.053 AUROC, 95% CI 0.032-0.075
+  - L32 `full_diff - tail`: +0.036 AUROC, 95% CI 0.011-0.060
+
+Interpretation:
+
+- The variance/discrimination mismatch is robust: top-4 directions remain weak despite dominating variance.
+- Mid/high-dimensional SVD coordinates and tail coordinates carry stable FP/TN signal.
+- However, the full difference vector remains the strongest detector under this logistic setup, so tail/residual geometry should be framed as mechanistically informative and causally relevant, not as the best standalone detector.
+
+## 2026-04-27 Stage Q Paper Asset Draft
+
+We generated the first paper-ready table/figure bundle from the accumulated outputs.
+
+Artifacts:
+
+- Asset index: `outputs/paper_tables/stage_q_asset_index.md`
+- Tables:
+  - `outputs/paper_tables/table1_pope_summary.csv`
+  - `outputs/paper_tables/table2_feature_comparison.csv`
+  - `outputs/paper_tables/table3_controls.csv`
+  - `outputs/paper_tables/table4_intervention.csv`
+- Figures:
+  - `outputs/paper_figures/fig1_method_overview.pdf`
+  - `outputs/paper_figures/fig2_variance_vs_auroc.pdf`
+  - `outputs/paper_figures/fig3_condition_geometry.pdf`
+  - `outputs/paper_figures/fig4_intervention_dose.pdf`
+  - `outputs/paper_figures/fig5_layered_geometry.pdf`
+
+Figure contents:
+
+- Figure 1: paired image/question and blind-question pipeline, `z_img`, `z_blind`, difference geometry, SVD bands/probes/interventions.
+- Figure 2: cumulative explained variance vs FP/TN AUROC over top-K SVD coordinates.
+- Figure 3: matched vs random/adversarial mismatch geometry, separated into top-4 backbone and tail 257-1024 views.
+- Figure 4: L24 tail-ablation dose curve, margin shift, TN damage, and norm-matched random-tail control.
+- Figure 5: layered summary of top-4 variance concentration vs full-diff/tail FP/TN AUROC, plus Stage E layer-sweep intervention sensitivity.
+
+Table contents:
+
+- Table 1: POPE subset performance and outcome distribution.
+- Table 2: feature comparison across raw image/blind states, full difference, top-K SVD, full SVD coordinates, random controls, and evidence-specific subspaces.
+- Table 3: destructive geometry controls from Stage J.
+- Table 4: intervention summary covering Stage E tail ablation and Stage M local rescue rows.
+
+Current caveat:
+
+- Figure 5 is still a first-pass layered summary. It now includes a cross-layer intervention-sensitivity panel, but the “middle-layer correction / late-layer arbitration” wording should remain cautious until the intervention evidence is cleaned up further.
+
+## 2026-05-04 Stage R2 Case Panels
+
+We generated human-readable case panels for qualitative analysis.
+
+Artifacts:
+
+- Metadata: `outputs/case_studies/case_panel_metadata.csv`
+- Notes: `notes/case_studies.md`
+- Build summary: `outputs/case_studies/build_stage_r_case_panels_summary.json`
+
+Case coverage:
+
+| Category | Count |
+| --- | ---: |
+| successful TN with strong tail correction | 4 |
+| FP with weak matched correction | 4 |
+| FP rescued by local steering | 2 |
+| FP not rescued despite high score | 4 |
+| adversarial mismatch example | 4 |
+| semantic direction extreme samples | 4 |
+| total | 22 |
+
+Notes:
+
+- The current Stage M run has only 2 unique rescued FP samples, so that category cannot reach the default 4 examples without duplicating cases.
+- Each case includes image path, question, ground truth, model answer, outcome, target object, geometry scores, intervention summary when available, and a short human-readable explanation.
+- These panels are intended as qualitative support and failure analysis, not as new quantitative evidence.
+
+## 2026-05-04 Stage R1 Semantic Fingerprints
+
+We consolidated the Stage G semantic analysis into a paper-facing semantic fingerprint bundle.
+
+Artifacts:
+
+- Summary: `outputs/stage_r_semantics/semantic_fingerprint_summary.csv`
+- Per-object panels: `outputs/stage_r_semantics/semantic_sample_panels/`
+- Conclusion note: `notes/semantic_interpretation_conclusion.md`
+- Build summary: `outputs/stage_r_semantics/build_stage_r_semantic_fingerprints_summary.json`
+
+Coverage:
+
+- 28 projected geometry objects:
+  - top-SVD backbone directions
+  - L24 tail 257-1024 slice
+  - L32 local TN/rescue directions
+- 4 Stage L evidence-specific quantitative-only rows:
+  - PLS FP/TN
+  - Fisher FP/TN
+  - contrastive PCA
+  - matched-vs-adversarial logistic
+
+Main conclusion:
+
+- Top-SVD backbone directions often have broad visual-scene, attribute, count, action, or spatial vocabulary fingerprints.
+- The L24 tail 257-1024 slice is object-heavy and aligns with the tail-ablation story.
+- L32 local TN rescue directions look more like relational/contextual or yes-no arbitration directions than simple object-presence detectors.
+- Stage L evidence-specific subspaces are quantitatively useful, but they have not yet been vocabulary-projected.
+
+Important limitation:
+
+- No single projected semantic direction is a strong hallucination detector. The strongest sample-level FP/TN contrasts remain modest, e.g. L20 SVD-8 FP/TN AUC 0.562.
+- The recommended wording is **partially interpretable grounding-related correction geometry**, not **semantic hallucination coordinate** or **universal grounding subspace**.
+
+## 2026-05-04 Stage S Baseline Positioning
+
+We generated baseline comparison tables for detection and mitigation/rescue positioning.
+
+Artifacts:
+
+- Detection baselines: `outputs/stage_s_baselines/detection_baseline_comparison.csv`
+- Mitigation baselines: `outputs/stage_s_baselines/mitigation_baseline_comparison.csv`
+- Notes: `notes/baseline_positioning.md`
+- Build summary: `outputs/stage_s_baselines/build_stage_s_baselines_summary.json`
+
+Detection result:
+
+- On the Stage M first-token subset, yes/no margin is a very strong FP-vs-TN baseline:
+  - yes/no margin AUROC: 1.000
+  - binary entropy AUROC: 0.884
+  - Stage M FP-risk score AUROC: 0.827
+- On full POPE hidden-state probes / multi-seed summaries:
+  - paired full difference, 5-seed mean AUROC: 0.721
+  - Stage L PLS FP/TN AUROC: 0.720
+  - single-run paired full difference AUROC: 0.694
+  - raw blind-state hidden probe AUROC: 0.672
+  - raw image-state hidden probe AUROC: 0.651
+
+Interpretation:
+
+- The paired-difference method should not be framed as a pure detection leaderboard win, especially because margin/entropy can be very strong when logits are available.
+- The stronger claim is mechanistic: paired differencing localizes hallucination-related signal and shows why top-variance directions are not the decision geometry.
+
+Mitigation/rescue result:
+
+- Current Stage M rescue remains weak and boundary-local.
+- Random TN, global TN, and local TN correction all reach 0.25 rescue rate on a gated 4-FP subset at alpha 8, so local retrieval does not clearly beat controls.
+- TN/TP preservation is undefined for those gated best rows because no TN/TP controls passed the same `margin_and_fp_risk` gate.
+- VCD/ICD and evidence-specific steering were not run in the current artifact set.
+
+## 2026-05-04 Stage T Final Paper Framing
+
+We made the final paper-positioning decision based on the completed Stage P/Q/R/S evidence.
+
+Artifact:
+
+- Decision note: `notes/final_paper_framing_decision.md`
+
+Decision:
+
+- The paper should be framed as a **mechanistic analysis paper**, not a mitigation-method paper.
+- Main contribution: blind-reference differencing reveals layered correction geometry in LVLM hallucination.
+- Intervention/rescue should be presented as causal evidence for the relevance of the geometry, not as a reliable mitigation method.
+
+Rationale:
+
+- The paired-difference family remains mechanistically strong and competitive across hidden-state probes.
+- Top-variance SVD directions are repeatedly shown to be insufficient as decision geometry.
+- Semantic fingerprints support partially interpretable grounding-related correction geometry, but not a single semantic hallucination coordinate.
+- Detection baselines using first-token margin/entropy can be very strong when logits are available.
+- Current rescue is weak, boundary-local, and not clearly better than random/global/local TN controls on the small gated subset.
+
+Recommended title direction:
+
+- "Blind-Reference Differencing Reveals Layered Correction Geometry in Vision-Language Hallucination"
+
+## 2026-05-04 TODO Checklist Synchronization
+
+After Stage T, we reconciled the bottom completion checklist with the already completed stage artifacts.
+
+Updated checklist status:
+
+- J1 shuffle controls: completed; results are in `outputs/stage_j_controls/`.
+- J2 random subspace controls: completed; random subspaces are close enough that the paper should report distributed signal rather than uniquely SVD-captured signal.
+- K1 token-position pilot: completed; the core signal survives multiple readout positions.
+- L1 evidence-specific subspace extraction: completed for extraction/evaluation, but not wired into intervention.
+- M1/M2 adaptive local rescue: completed for memory bank, gated steering, and analysis; rescue remains weak and boundary-local.
+
+Remaining high-impact open items:
+
+- O1/O2 cross-model minimal replication.
+- Lightweight adapter or representation-editing extension.
+- Evidence-specific steering and compute-overhead measurement if the intervention story is revisited.
+
+## 2026-05-04 Stage O Cross-Model Preparation
+
+We prepared the next high-impact experiment: a minimal cross-model replication.
+
+Choice note:
+
+- `notes/cross_model_choice.md`
+
+Prepared scripts:
+
+- GPU: `scripts/run_gpu_stage_o_cross_model.sh`
+- CPU: `scripts/run_cpu_stage_o_cross_model.sh`
+- Summary builder: `scripts/build_stage_o_cross_model_summary.py`
+
+Current model choice:
+
+- Use a LLaVA-HF-compatible additional checkpoint first, preferably `llava-hf/llava-1.5-13b-hf` if locally available and GPU memory allows.
+- This is a conservative wrapper-compatible choice because the current environment has `transformers==4.37.2` and does not expose the LLaVA-NeXT or Qwen2-VL generation classes.
+
+Prepared minimal chain:
+
+- POPE prediction summary.
+- L20/L24/L32 hidden states.
+- Blind-image difference SVD and spectrum summary.
+- Stage C-style FP/TN probes.
+- Stage B matched-vs-random/adversarial mismatch condition geometry.
+- No Stage E intervention unless early cross-model results look promising.
+
+## 2026-05-04 Stage O Cross-Model Replication Result
+
+The Stage O minimal replication completed for `llava_13b`, using local checkpoint `/data/lh/ModelandDataset/llava-1.5-13b-hf`.
+
+Artifacts:
+
+- Summary: `outputs/stage_o_cross_model/llava_13b/minimal_replication_summary.csv`
+- Note: `notes/cross_model_replication.md`
+- Prediction summary: `outputs/stage_o_cross_model/llava_13b/predictions/run_pope_eval_summary.json`
+- Probe table: `outputs/stage_o_cross_model/llava_13b/probes/probe_results.csv`
+- Condition geometry: `outputs/stage_o_cross_model/llava_13b/stage_b/stage_b_pairwise_condition_deltas.csv`
+
+POPE outcome:
+
+- Accuracy: `0.871`
+- FP: `468`
+- TN: `4032`
+- TP: `3804`
+- FN: `696`
+- unknown: `0`
+
+Main replication result:
+
+- The full blind-image difference is again the strongest available hidden-state detector:
+  - L20 full difference AUROC: `0.736`
+  - L24 full difference AUROC: `0.726`
+  - L32 full difference AUROC: `0.723`
+- Variance/discrimination mismatch clearly reappears:
+  - top-4 explained variance is large (`0.752` to `0.808`)
+  - but top-4 projected AUROC remains weak (`0.535` to `0.552`)
+- Larger projected coordinates become useful:
+  - best projected row: L32 K=128 AUROC `0.699`
+- Tail condition geometry partly reproduces:
+  - band 257-1024 matched-minus-adversarial deltas are positive at L20 `18.126`, L24 `28.860`, L32 `75.504`
+  - matched-minus-random tail deltas are mixed: L20 `3.622`, L24 `-0.711`, L32 `-14.696`
+
+Conclusion:
+
+- This is an acceptable-to-strong checkpoint-level replication across LLaVA-1.5 7B/13B.
+- It supports saying the mechanism is not a single-checkpoint artifact.
+- It still does not support a broad cross-architecture LVLM generality claim.
+
+## 2026-05-04 Representation Editing Prep
+
+We prepared a CPU-side direction bank for a future lightweight representation-editing pilot.
+
+Artifacts:
+
+- Direction bank: `outputs/representation_editing_prep/editing_direction_bank.pt`
+- Direction summary: `outputs/representation_editing_prep/direction_summary.csv`
+- Candidate evaluation plan: `outputs/representation_editing_prep/candidate_eval_plan.csv`
+- Note: `notes/representation_editing_prep.md`
+- Build summary: `outputs/representation_editing_prep/build_representation_editing_prep_summary.json`
+
+What was built:
+
+- 102 normalized candidate edit directions across L20/L24/L32.
+- 384 candidate GPU evaluation rows over direction, alpha, and gate choices.
+- Directions include:
+  - global TN mean correction
+  - global TN-minus-FP correction
+  - low-rank projected TN mean directions
+  - low-rank projected TN-minus-FP directions
+  - bases from plain SVD, Fisher FP/TN, PLS FP/TN, and matched-vs-adversarial logistic subspaces
+
+Top recommendation:
+
+- First GPU test: L24 `pls_fp_tn` k=32 `projected_tn_minus_fp`, with alpha 2/4/8 and `margin_and_fp_risk` gating.
+
+Important limitation:
+
+- This is a prepared activation-editing direction bank, not a trained LoRA adapter and not an evaluated mitigation method.

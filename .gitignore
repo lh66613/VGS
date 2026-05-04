@@ -7,6 +7,7 @@ __pycache__/
 
 # Large local artifacts
 data/pope/*
+data/amber/*
 data/chair_optional/*
 data/cache/*
 outputs/**

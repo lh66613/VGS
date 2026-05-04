@@ -107,10 +107,6 @@ def extract_hidden_pair(
     device: str,
     readout_position: str = "last_prompt_token",
 ) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
-    if readout_position != "last_prompt_token":
-        raise NotImplementedError(
-            "Only last_prompt_token is implemented for the first HF hidden-state dump."
-        )
     image = Image.open(Path(row["image_path"])).convert("RGB")
     image_prompt = build_pope_prompt(processor, row["question"])
     image_inputs = processor(images=image, text=image_prompt, return_tensors="pt")
@@ -136,8 +132,16 @@ def extract_hidden_pair(
     blind_index = int(blind_inputs["attention_mask"][0].sum().item()) - 1
     pairs: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     for layer in layers:
-        image_state = image_outputs.hidden_states[layer][0, image_index].detach().cpu().float()
-        blind_state = blind_outputs.hidden_states[layer][0, blind_index].detach().cpu().float()
+        image_state = _readout_hidden_state(
+            image_outputs.hidden_states[layer][0],
+            image_index,
+            readout_position,
+        )
+        blind_state = _readout_hidden_state(
+            blind_outputs.hidden_states[layer][0],
+            blind_index,
+            readout_position,
+        )
         pairs[layer] = (image_state, blind_state)
     return pairs
 
@@ -152,10 +156,6 @@ def extract_condition_hidden_states(
     device: str,
     readout_position: str = "last_prompt_token",
 ) -> dict[int, torch.Tensor]:
-    if readout_position != "last_prompt_token":
-        raise NotImplementedError(
-            "Only last_prompt_token is implemented for condition hidden-state dumps."
-        )
     if image_path:
         image = Image.open(Path(image_path)).convert("RGB")
         prompt = build_pope_prompt(processor, question)
@@ -181,9 +181,25 @@ def extract_condition_hidden_states(
         index = int(inputs["attention_mask"][0].sum().item()) - 1
 
     return {
-        layer: outputs.hidden_states[layer][0, index].detach().cpu().float()
+        layer: _readout_hidden_state(outputs.hidden_states[layer][0], index, readout_position)
         for layer in layers
     }
+
+
+def _readout_hidden_state(
+    sequence_states: torch.Tensor,
+    last_index: int,
+    readout_position: str,
+) -> torch.Tensor:
+    if readout_position in {"last_prompt_token", "first_answer_prefill"}:
+        return sequence_states[last_index].detach().cpu().float()
+    if readout_position == "last_4_prompt_mean":
+        start = max(0, last_index - 3)
+        return sequence_states[start : last_index + 1].mean(dim=0).detach().cpu().float()
+    if readout_position == "last_8_prompt_mean":
+        start = max(0, last_index - 7)
+        return sequence_states[start : last_index + 1].mean(dim=0).detach().cpu().float()
+    raise NotImplementedError(f"Unsupported readout position: {readout_position}")
 
 
 def _move_inputs(inputs: Any, device: str, dtype: torch.dtype | None = None) -> Any:
