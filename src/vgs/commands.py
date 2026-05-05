@@ -14,24 +14,21 @@ from typing import Any
 import torch
 from tqdm.auto import tqdm
 
-from vgs.analysis import (
-    analyze_k_sensitivity,
-    analyze_spectra,
-    build_difference_matrices,
-    compare_probe_features,
-    layerwise_summary,
-    train_probe_models,
-)
 from vgs.cli import add_common_args, add_k_args, add_layer_args, resolve_k_grid, resolve_layers
 from vgs.config import config_get, load_config
 from vgs.constants import DEFAULT_POPE_SUBSETS
 from vgs.datasets import load_pope_subset, validate_pope_samples
 from vgs.io import append_experiment_log, write_json, write_jsonl
-from vgs.llava_hf import extract_hidden_pair, generate_pope_answer, load_llava_hf, resolve_device
+from vgs.llava_hf import load_llava_hf
+from vgs.vlm_hf import (
+    MODEL_FAMILIES,
+    extract_hidden_pair as extract_vlm_hidden_pair,
+    generate_pope_answer as generate_vlm_pope_answer,
+    load_vlm_hf,
+    resolve_device,
+)
 from vgs.pope import classify_outcome, parse_yes_no
 from vgs.artifacts import read_jsonl, save_hidden_layer
-from vgs.stage_e import run_intervention_pilot, run_intervention_precheck
-from vgs.semantics import run_semantic_interpretation
 
 
 def _finish(args: argparse.Namespace, stage: str, output_dir: str | Path, payload: dict[str, Any]) -> Path:
@@ -50,11 +47,25 @@ def _finish(args: argparse.Namespace, stage: str, output_dir: str | Path, payloa
     return summary_path
 
 
+def _add_vlm_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--model-family", choices=sorted(MODEL_FAMILIES), default="auto")
+    parser.add_argument(
+        "--trust-remote-code",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow HF remote-code models such as InternVL.",
+    )
+    parser.add_argument("--qwen-min-pixels", type=int, default=None)
+    parser.add_argument("--qwen-max-pixels", type=int, default=None)
+    parser.add_argument("--internvl-max-tiles", type=int, default=12)
+
+
 def run_pope_eval_main() -> None:
-    parser = argparse.ArgumentParser(description="Run LLaVA-1.5-7B on POPE and save predictions.")
+    parser = argparse.ArgumentParser(description="Run a Hugging Face VLM on POPE and save predictions.")
     add_common_args(parser)
     parser.add_argument("--model-source", choices=["hf", "official"], default="hf")
     parser.add_argument("--model-path", default=None)
+    _add_vlm_args(parser)
     parser.add_argument("--family", default=None)
     parser.add_argument("--questions-dir", default=None)
     parser.add_argument("--images-dir", default=None)
@@ -86,6 +97,7 @@ def run_pope_eval_main() -> None:
     payload = {
         "model_source": args.model_source,
         "model_path": model_path,
+        "model_family": args.model_family,
         "family": family,
         "questions_dir": questions_dir,
         "images_dir": images_dir,
@@ -103,23 +115,25 @@ def run_pope_eval_main() -> None:
         return
 
     if args.model_source != "hf":
-        raise NotImplementedError("Only the Hugging Face LLaVA path is implemented at this stage.")
-    resolved_device = resolve_device(args.device, allow_cpu=args.allow_cpu)
-    model, processor, resolved_device = load_llava_hf(
+        raise NotImplementedError("Only the Hugging Face path is implemented at this stage.")
+    bundle = load_vlm_hf(
         model_path,
-        device=resolved_device,
+        model_family=args.model_family,
+        device=args.device,
         torch_dtype=torch_dtype,
         allow_cpu=args.allow_cpu,
+        trust_remote_code=args.trust_remote_code,
+        qwen_min_pixels=args.qwen_min_pixels,
+        qwen_max_pixels=args.qwen_max_pixels,
+        internvl_max_tiles=args.internvl_max_tiles,
     )
 
     rows = []
     counts = {"TP": 0, "TN": 0, "FP": 0, "FN": 0, "unknown": 0}
     for sample in tqdm(samples, desc="POPE generation", unit="sample"):
-        raw_generation = generate_pope_answer(
-            model,
-            processor,
+        raw_generation = generate_vlm_pope_answer(
+            bundle,
             sample,
-            device=resolved_device,
             max_new_tokens=args.max_new_tokens,
         )
         parsed_prediction = parse_yes_no(raw_generation)
@@ -142,7 +156,8 @@ def run_pope_eval_main() -> None:
     )
     payload.update(
         {
-            "resolved_device": resolved_device,
+            "resolved_device": bundle.device,
+            "resolved_model_family": bundle.family,
             "predictions_path": str(predictions_path),
             "counts": counts,
             "accuracy": accuracy,
@@ -198,6 +213,7 @@ def dump_hidden_states_main() -> None:
     add_layer_args(parser)
     parser.add_argument("--model-source", choices=["hf", "official"], default="hf")
     parser.add_argument("--model-path", default=None)
+    _add_vlm_args(parser)
     parser.add_argument("--predictions", default="outputs/predictions/pope_predictions.jsonl")
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
@@ -215,6 +231,7 @@ def dump_hidden_states_main() -> None:
         "layers": layers,
         "model_source": args.model_source,
         "model_path": model_path,
+        "model_family": args.model_family,
         "predictions": args.predictions,
         "max_samples": args.max_samples,
         "readout_position": args.readout_position,
@@ -228,13 +245,17 @@ def dump_hidden_states_main() -> None:
         return
 
     if args.model_source != "hf":
-        raise NotImplementedError("Only the Hugging Face LLaVA path is implemented at this stage.")
-    resolved_device = resolve_device(args.device, allow_cpu=args.allow_cpu)
-    model, processor, resolved_device = load_llava_hf(
+        raise NotImplementedError("Only the Hugging Face path is implemented at this stage.")
+    bundle = load_vlm_hf(
         model_path,
-        device=resolved_device,
+        model_family=args.model_family,
+        device=args.device,
         torch_dtype=torch_dtype,
         allow_cpu=args.allow_cpu,
+        trust_remote_code=args.trust_remote_code,
+        qwen_min_pixels=args.qwen_min_pixels,
+        qwen_max_pixels=args.qwen_max_pixels,
+        internvl_max_tiles=args.internvl_max_tiles,
     )
     rows = read_jsonl(args.predictions)
     if args.max_samples is not None:
@@ -245,12 +266,10 @@ def dump_hidden_states_main() -> None:
     sample_ids = []
     for row in tqdm(rows, desc="dump hidden states", unit="sample"):
         sample_ids.append(str(row["sample_id"]))
-        pairs = extract_hidden_pair(
-            model,
-            processor,
+        pairs = extract_vlm_hidden_pair(
+            bundle,
             row,
             layers,
-            resolved_device,
             readout_position=args.readout_position,
         )
         for layer, (z_img, z_blind) in pairs.items():
@@ -268,6 +287,7 @@ def dump_hidden_states_main() -> None:
             metadata={
                 "model_path": model_path,
                 "model_source": args.model_source,
+                "model_family": bundle.family,
                 "readout_position": args.readout_position,
                 "hidden_stream": args.hidden_stream,
                 "predictions": args.predictions,
@@ -276,7 +296,8 @@ def dump_hidden_states_main() -> None:
         artifacts.append(str(path))
     payload.update(
         {
-            "resolved_device": resolved_device,
+            "resolved_device": bundle.device,
+            "resolved_model_family": bundle.family,
             "num_samples": len(sample_ids),
             "artifacts": artifacts,
         }
@@ -309,6 +330,8 @@ def build_difference_matrix_main() -> None:
         "split": args.split,
     }
     if not args.dry_run:
+        from vgs.analysis import build_difference_matrices
+
         rows = build_difference_matrices(
             resolve_layers(args),
             args.hidden_states_dir,
@@ -339,6 +362,8 @@ def analyze_spectrum_main() -> None:
         "plot_dir": args.plot_dir,
     }
     if not args.dry_run:
+        from vgs.analysis import analyze_spectra
+
         payload["summary_rows"] = analyze_spectra(
             resolve_layers(args), args.matrix_dir, args.output_dir, args.plot_dir
         )
@@ -385,6 +410,8 @@ def analyze_k_sensitivity_main() -> None:
         "stability_sample_size": args.stability_sample_size,
     }
     if not args.dry_run:
+        from vgs.analysis import analyze_k_sensitivity
+
         payload["summary_rows"] = analyze_k_sensitivity(
             resolve_layers(args),
             resolve_k_grid(args),
@@ -425,6 +452,8 @@ def train_probe_main() -> None:
         "svd_dir": args.svd_dir,
     }
     if not args.dry_run:
+        from vgs.analysis import train_probe_models
+
         payload["summary_rows"] = train_probe_models(
             resolve_layers(args),
             resolve_k_grid(args),
@@ -457,6 +486,8 @@ def compare_features_main() -> None:
         "probe_dir": args.probe_dir,
     }
     if not args.dry_run:
+        from vgs.analysis import compare_probe_features
+
         payload["summary_rows"] = compare_probe_features(args.probe_dir, args.output_dir)
     _finish(
         args,
@@ -484,6 +515,8 @@ def layerwise_analysis_main() -> None:
         "plot_dir": args.plot_dir,
     }
     if not args.dry_run:
+        from vgs.analysis import layerwise_summary
+
         payload.update(
             layerwise_summary(
                 resolve_layers(args),
@@ -548,6 +581,8 @@ def intervention_precheck_main() -> None:
         if args.max_samples is not None:
             rows = rows[: args.max_samples]
         payload.update({"resolved_device": resolved_device})
+        from vgs.stage_e import run_intervention_precheck
+
         payload.update(
             run_intervention_precheck(
                 model,
@@ -630,6 +665,8 @@ def intervention_pilot_main() -> None:
         )
         rows = read_jsonl(args.predictions)
         payload.update({"resolved_device": resolved_device})
+        from vgs.stage_e import run_intervention_pilot
+
         payload.update(
             run_intervention_pilot(
                 model,
@@ -701,6 +738,8 @@ def semantic_interpretation_main() -> None:
         "natural_token_filter": args.natural_token_filter,
     }
     if not args.dry_run:
+        from vgs.semantics import run_semantic_interpretation
+
         payload.update(
             run_semantic_interpretation(
                 layers=resolve_layers(args),

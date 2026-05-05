@@ -3,23 +3,11 @@
 from __future__ import annotations
 
 import math
-import os
 import re
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
 
 from vgs.artifacts import (
@@ -30,6 +18,13 @@ from vgs.artifacts import (
 )
 from vgs.geometry import projection_similarity
 from vgs.io import ensure_dir, write_csv, write_jsonl
+
+
+pd = None
+plt = None
+LinearDiscriminantAnalysis = None
+LogisticRegression = None
+StandardScaler = None
 
 
 def prepare_stage_b_condition_plan(
@@ -120,6 +115,7 @@ def analyze_stage_b_geometry(
     plot_dir: str | Path,
     seed: int,
 ) -> dict[str, Any]:
+    _ensure_analysis_dependencies()
     ensure_dir(output_dir)
     ensure_dir(plot_dir)
     plan_rows = read_jsonl(condition_plan_path)
@@ -332,6 +328,7 @@ def _reference_supervised_vectors(
     hidden_states_dir: str | Path,
     seed: int,
 ) -> dict[str, np.ndarray]:
+    _ensure_analysis_dependencies()
     prediction_rows = read_jsonl(predictions_path)
     labels_by_id = {}
     for row in prediction_rows:
@@ -484,6 +481,7 @@ def _condition_subspace_rows(
 
 
 def _plot_stage_b_condition_summary(rows: list[dict[str, Any]], plot_dir: Path) -> None:
+    _ensure_analysis_dependencies()
     df = pd.DataFrame(rows)
     if df.empty:
         return
@@ -515,6 +513,7 @@ def _plot_stage_b_condition_summary(rows: list[dict[str, Any]], plot_dir: Path) 
 
 
 def _plot_stage_b_outcome_summary(rows: list[dict[str, Any]], plot_dir: Path) -> None:
+    _ensure_analysis_dependencies()
     df = pd.DataFrame(rows)
     if df.empty:
         return
@@ -536,6 +535,29 @@ def _plot_stage_b_outcome_summary(rows: list[dict[str, Any]], plot_dir: Path) ->
         fig.tight_layout()
         fig.savefig(plot_dir / f"stage_b_outcome_scores_layer_{layer}.png", dpi=180)
         plt.close(fig)
+
+
+def _ensure_analysis_dependencies() -> None:
+    global LinearDiscriminantAnalysis, LogisticRegression, StandardScaler, pd, plt
+    if pd is not None:
+        return
+    import os
+
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as matplotlib_pyplot
+    import pandas as pandas_module
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as SklearnLDA
+    from sklearn.linear_model import LogisticRegression as SklearnLogisticRegression
+    from sklearn.preprocessing import StandardScaler as SklearnStandardScaler
+
+    pd = pandas_module
+    plt = matplotlib_pyplot
+    LinearDiscriminantAnalysis = SklearnLDA
+    LogisticRegression = SklearnLogisticRegression
+    StandardScaler = SklearnStandardScaler
 
 
 def _fieldnames(rows: list[dict[str, Any]]) -> list[str]:

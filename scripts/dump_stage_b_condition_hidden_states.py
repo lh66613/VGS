@@ -12,7 +12,11 @@ from vgs.artifacts import read_jsonl, save_condition_hidden_layer
 from vgs.cli import add_common_args, add_layer_args, resolve_layers
 from vgs.config import config_get, load_config
 from vgs.io import append_experiment_log, write_json
-from vgs.llava_hf import extract_condition_hidden_states, load_llava_hf, resolve_device
+from vgs.vlm_hf import (
+    MODEL_FAMILIES,
+    extract_condition_hidden_states,
+    load_vlm_hf,
+)
 
 
 CONDITION_IMAGE_KEYS = {
@@ -31,6 +35,16 @@ def main() -> None:
     add_layer_args(parser)
     parser.add_argument("--model-source", choices=["hf", "official"], default="hf")
     parser.add_argument("--model-path", default=None)
+    parser.add_argument("--model-family", choices=sorted(MODEL_FAMILIES), default="auto")
+    parser.add_argument(
+        "--trust-remote-code",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow HF remote-code models such as InternVL.",
+    )
+    parser.add_argument("--qwen-min-pixels", type=int, default=None)
+    parser.add_argument("--qwen-max-pixels", type=int, default=None)
+    parser.add_argument("--internvl-max-tiles", type=int, default=12)
     parser.add_argument("--condition-plan", default="outputs/stage_b/stage_b_condition_plan.jsonl")
     parser.add_argument(
         "--conditions",
@@ -58,6 +72,7 @@ def main() -> None:
         "layers": layers,
         "model_source": args.model_source,
         "model_path": model_path,
+        "model_family": args.model_family,
         "condition_plan": args.condition_plan,
         "conditions": args.conditions,
         "max_samples": args.max_samples,
@@ -74,17 +89,21 @@ def main() -> None:
         return
 
     if args.model_source != "hf":
-        raise NotImplementedError("Only the Hugging Face LLaVA path is implemented at this stage.")
+        raise NotImplementedError("Only the Hugging Face path is implemented at this stage.")
     for condition in args.conditions:
         if condition not in CONDITION_IMAGE_KEYS:
             raise ValueError(f"Unknown Stage B condition: {condition}")
 
-    resolved_device = resolve_device(args.device, allow_cpu=args.allow_cpu)
-    model, processor, resolved_device = load_llava_hf(
+    bundle = load_vlm_hf(
         model_path,
-        device=resolved_device,
+        model_family=args.model_family,
+        device=args.device,
         torch_dtype=torch_dtype,
         allow_cpu=args.allow_cpu,
+        trust_remote_code=args.trust_remote_code,
+        qwen_min_pixels=args.qwen_min_pixels,
+        qwen_max_pixels=args.qwen_max_pixels,
+        internvl_max_tiles=args.internvl_max_tiles,
     )
 
     layer_condition_states = {
@@ -100,12 +119,10 @@ def main() -> None:
             if image_key and not image_path:
                 raise ValueError(f"Missing image path for condition {condition}, sample {row['sample_id']}")
             states = extract_condition_hidden_states(
-                model,
-                processor,
+                bundle,
                 row["question"],
                 image_path,
                 layers,
-                resolved_device,
                 readout_position=args.readout_position,
             )
             for layer, state in states.items():
@@ -126,12 +143,19 @@ def main() -> None:
             metadata={
                 "model_path": model_path,
                 "model_source": args.model_source,
+                "model_family": bundle.family,
                 "readout_position": args.readout_position,
                 "condition_plan": args.condition_plan,
             },
         )
         artifacts.append(str(path))
-    payload.update({"resolved_device": resolved_device, "artifacts": artifacts})
+    payload.update(
+        {
+            "resolved_device": bundle.device,
+            "resolved_model_family": bundle.family,
+            "artifacts": artifacts,
+        }
+    )
     summary_path = write_json(Path(args.output_dir) / "dump_stage_b_condition_hidden_states_summary.json", payload)
     append_experiment_log(args.log_path, "dump_stage_b_condition_hidden_states", summary_path, "ok")
     print(summary_path)

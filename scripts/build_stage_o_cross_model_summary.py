@@ -25,6 +25,8 @@ def main() -> None:
     rows.extend(_prediction_rows(args.model_alias, root))
     rows.extend(_spectrum_rows(args.model_alias, root))
     rows.extend(_probe_rows(args.model_alias, root))
+    rows.extend(_curve_rows(args.model_alias, root))
+    rows.extend(_margin_rows(args.model_alias, root))
     rows.extend(_condition_rows(args.model_alias, root))
 
     summary = pd.DataFrame(rows)
@@ -134,6 +136,52 @@ def _probe_rows(model_alias: str, root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _curve_rows(model_alias: str, root: Path) -> list[dict[str, Any]]:
+    path = root / "stage_c_deep" / "stage_c_topk_curve.csv"
+    if not path.exists():
+        return [_missing_row(model_alias, "explained_variance_vs_auroc_curve", path)]
+    df = pd.read_csv(path)
+    rows = []
+    for _, row in df.iterrows():
+        rows.append(
+            {
+                "model_alias": model_alias,
+                "section": "explained_variance_vs_auroc_curve",
+                "metric": "auroc",
+                "layer": int(row["layer"]),
+                "feature": "projected_difference",
+                "comparison": f"k={row['k']}; explained_variance={row['explained_variance']}",
+                "value": row.get("auroc"),
+                "status": "available",
+                "source": str(path),
+            }
+        )
+    return rows
+
+
+def _margin_rows(model_alias: str, root: Path) -> list[dict[str, Any]]:
+    path = root / "margins" / "margin_baseline_metrics.csv"
+    if not path.exists():
+        return [_missing_row(model_alias, "first_token_margin_baseline", path)]
+    df = pd.read_csv(path)
+    rows = []
+    for _, row in df.iterrows():
+        rows.append(
+            {
+                "model_alias": model_alias,
+                "section": "first_token_margin_baseline",
+                "metric": "auroc",
+                "layer": "",
+                "feature": row["baseline"],
+                "comparison": row["direction"],
+                "value": row.get("auroc"),
+                "status": "available",
+                "source": str(path),
+            }
+        )
+    return rows
+
+
 def _condition_rows(model_alias: str, root: Path) -> list[dict[str, Any]]:
     path = root / "stage_b" / "stage_b_pairwise_condition_deltas.csv"
     if not path.exists():
@@ -208,6 +256,30 @@ def _render_note(model_alias: str, root: Path, summary: pd.DataFrame) -> str:
                 )
         else:
             lines.append("- No probe rows available yet.")
+        lines.append("")
+
+        lines.extend(["## Margin Baseline", ""])
+        margins = available[
+            (available["section"] == "first_token_margin_baseline")
+            & (available["metric"] == "auroc")
+        ].copy()
+        if not margins.empty:
+            margins["value"] = pd.to_numeric(margins["value"], errors="coerce")
+            for _, row in margins.sort_values("value", ascending=False).iterrows():
+                lines.append(
+                    f"- `{row['feature']}` `{row['comparison']}`: AUROC `{row['value']:.3f}`"
+                )
+        else:
+            lines.append("- No margin-baseline rows available yet.")
+        lines.append("")
+
+        lines.extend(["## Variance/AUROC Curve", ""])
+        curve = available[available["section"] == "explained_variance_vs_auroc_curve"].copy()
+        if not curve.empty:
+            lines.append(f"- Available rows: `{len(curve)}` from `stage_c_deep/stage_c_topk_curve.csv`.")
+            lines.append("- Plot: `plots/stage_c_topk_auroc_explained_variance.png`.")
+        else:
+            lines.append("- No explained-variance/AUROC curve rows available yet.")
         lines.append("")
 
         lines.extend(["## Condition Geometry Snapshot", ""])
