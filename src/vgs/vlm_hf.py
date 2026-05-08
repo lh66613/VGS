@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import json
 import math
@@ -118,6 +119,7 @@ def load_vlm_hf(
         processor = AutoProcessor.from_pretrained(
             model_path,
             trust_remote_code=trust_remote_code,
+            use_fast=False,
             **processor_kwargs,
         )
         return VLMHFBundle(
@@ -178,6 +180,7 @@ def generate_pope_answer(
         inputs = _qwen_inputs(bundle, sample.question, image)
         output_ids = bundle.model.generate(
             **inputs,
+            generation_config=_greedy_generation_config(bundle.model),
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=_pad_token_id(bundle.tokenizer),
@@ -186,18 +189,12 @@ def generate_pope_answer(
         generated_ids = output_ids[0, prompt_length:]
         return bundle.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
     if bundle.family == "internvl2":
-        pixel_values = _internvl_load_image(
+        return _internvl_generate_greedy(
+            bundle,
+            sample.question,
             sample.image_path,
-            input_size=bundle.internvl_image_size,
-            max_tiles=bundle.internvl_max_tiles,
-        ).to(device=bundle.device, dtype=bundle.torch_dtype)
-        generation_config = {"max_new_tokens": max_new_tokens, "do_sample": False}
-        return bundle.model.chat(
-            bundle.tokenizer,
-            pixel_values,
-            _pope_instruction(sample.question),
-            generation_config,
-        ).strip()
+            max_new_tokens=max_new_tokens,
+        )
     raise ValueError(f"Unsupported model family: {bundle.family}")
 
 
@@ -254,14 +251,22 @@ def extract_condition_hidden_states(
         )
     if bundle.family in {"qwen2_vl", "qwen2_5_vl"}:
         image = Image.open(Path(image_path)).convert("RGB") if image_path else None
-        inputs = _qwen_inputs(bundle, question, image)
+        prompt = _qwen_prompt(bundle, question, image is not None)
+        inputs = _qwen_inputs_from_prompt(bundle, prompt, image)
         outputs = bundle.model(
             **inputs,
             output_hidden_states=True,
             return_dict=True,
             use_cache=False,
         )
-        index = int(inputs["attention_mask"][0].sum().item()) - 1
+        index = _readout_index_from_inputs(
+            bundle,
+            inputs,
+            readout_position,
+            user_text=_pope_instruction(question),
+            question_text=question,
+            prompt=prompt,
+        )
         return {
             layer: _readout_hidden_state(outputs.hidden_states[layer][0], index, readout_position)
             for layer in layers
@@ -270,7 +275,7 @@ def extract_condition_hidden_states(
         if image_path:
             inputs = _internvl_image_forward_inputs(bundle, question, image_path)
             outputs = bundle.model(
-                **inputs,
+                **_model_inputs(inputs),
                 output_hidden_states=True,
                 return_dict=True,
                 use_cache=False,
@@ -278,12 +283,12 @@ def extract_condition_hidden_states(
         else:
             inputs = _internvl_blind_inputs(bundle, question)
             outputs = bundle.model.language_model(
-                **inputs,
+                **_model_inputs(inputs),
                 output_hidden_states=True,
                 return_dict=True,
                 use_cache=False,
             )
-        index = int(inputs["attention_mask"][0].sum().item()) - 1
+        index = _readout_index_from_inputs(bundle, inputs, readout_position)
         return {
             layer: _readout_hidden_state(outputs.hidden_states[layer][0], index, readout_position)
             for layer in layers
@@ -316,7 +321,7 @@ def next_token_logits(bundle: VLMHFBundle, row: dict[str, Any]) -> torch.Tensor:
     if bundle.family == "internvl2":
         inputs = _internvl_image_forward_inputs(bundle, row["question"], row["image_path"])
         outputs = bundle.model(
-            **inputs,
+            **_model_inputs(inputs),
             return_dict=True,
             use_cache=False,
         )
@@ -375,17 +380,25 @@ def _load_qwen_model(
     )
 
 
-def _qwen_inputs(bundle: VLMHFBundle, question: str, image: Image.Image | None) -> Any:
+def _qwen_prompt(bundle: VLMHFBundle, question: str, has_image: bool) -> str:
     content: list[dict[str, Any]] = []
-    if image is not None:
+    if has_image:
         content.append({"type": "image"})
     content.append({"type": "text", "text": _pope_instruction(question)})
     messages = [{"role": "user", "content": content}]
-    prompt = bundle.processor.apply_chat_template(
+    return bundle.processor.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
     )
+
+
+def _qwen_inputs(bundle: VLMHFBundle, question: str, image: Image.Image | None) -> Any:
+    prompt = _qwen_prompt(bundle, question, image is not None)
+    return _qwen_inputs_from_prompt(bundle, prompt, image)
+
+
+def _qwen_inputs_from_prompt(bundle: VLMHFBundle, prompt: str, image: Image.Image | None) -> Any:
     if image is None:
         inputs = bundle.tokenizer(prompt, return_tensors="pt")
     else:
@@ -414,11 +427,24 @@ def _internvl_image_forward_inputs(
     attention_mask = model_inputs["attention_mask"].to(bundle.device)
     bundle.model.img_context_token_id = bundle.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     image_flags = torch.ones(pixel_values.shape[0], 1, dtype=torch.long, device=bundle.device)
+    instruction = _pope_instruction(question)
     return {
         "pixel_values": pixel_values,
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "image_flags": image_flags,
+        "_question_end_index": _prompt_user_content_end_index(
+            query,
+            question,
+            bundle.tokenizer,
+            int(attention_mask[0].sum().item()) - 1,
+        ),
+        "_user_content_end_index": _prompt_user_content_end_index(
+            query,
+            instruction,
+            bundle.tokenizer,
+            int(attention_mask[0].sum().item()) - 1,
+        ),
     }
 
 
@@ -428,7 +454,94 @@ def _internvl_blind_inputs(bundle: VLMHFBundle, question: str) -> dict[str, torc
     return {
         "input_ids": model_inputs["input_ids"].to(bundle.device),
         "attention_mask": model_inputs["attention_mask"].to(bundle.device),
+        "_question_end_index": _prompt_user_content_end_index(
+            query,
+            question,
+            bundle.tokenizer,
+            int(model_inputs["attention_mask"][0].sum().item()) - 1,
+        ),
+        "_user_content_end_index": _prompt_user_content_end_index(
+            query,
+            _pope_instruction(question),
+            bundle.tokenizer,
+            int(model_inputs["attention_mask"][0].sum().item()) - 1,
+        ),
     }
+
+
+def _internvl_generate_greedy(
+    bundle: VLMHFBundle,
+    question: str,
+    image_path: str,
+    max_new_tokens: int,
+) -> str:
+    inputs = _internvl_image_forward_inputs(bundle, question, image_path)
+    eos_token_id, sep_text = _internvl_stop_token(bundle)
+
+    outputs = bundle.model(
+        **_model_inputs(inputs),
+        return_dict=True,
+        use_cache=True,
+    )
+    attention_mask = inputs["attention_mask"]
+    generated_ids: list[int] = []
+
+    for _ in range(max_new_tokens):
+        next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1)
+        next_token_id = int(next_token.item())
+        if eos_token_id is not None and next_token_id == eos_token_id:
+            break
+        generated_ids.append(next_token_id)
+
+        attention_mask = torch.cat(
+            [
+                attention_mask,
+                torch.ones(
+                    (attention_mask.shape[0], 1),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                ),
+            ],
+            dim=1,
+        )
+        position_ids = attention_mask.long().cumsum(-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 1)
+        position_ids = position_ids[:, -1:]
+        outputs = bundle.model.language_model(
+            input_ids=next_token[:, None],
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=outputs.past_key_values,
+            return_dict=True,
+            use_cache=True,
+        )
+
+    text = bundle.tokenizer.decode(
+        generated_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    ).strip()
+    if sep_text:
+        text = text.split(sep_text, 1)[0].strip()
+    return text
+
+
+def _internvl_stop_token(bundle: VLMHFBundle) -> tuple[int | None, str | None]:
+    sep_text = None
+    try:
+        template = bundle.model.conv_template.copy()
+        sep_text = template.sep.strip() if template.sep else None
+    except AttributeError:
+        sep_text = None
+    if sep_text:
+        token_id = bundle.tokenizer.convert_tokens_to_ids(sep_text)
+        if isinstance(token_id, int) and token_id >= 0:
+            return token_id, sep_text
+
+    eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
+    if isinstance(eos_token_id, list):
+        eos_token_id = eos_token_id[0] if eos_token_id else None
+    return (int(eos_token_id) if eos_token_id is not None else None), sep_text
 
 
 def _internvl_query(bundle: VLMHFBundle, question: str, num_patches: int) -> str:
@@ -534,15 +647,90 @@ def _readout_hidden_state(
     last_index: int,
     readout_position: str,
 ) -> torch.Tensor:
-    if readout_position in {"last_prompt_token", "first_answer_prefill"}:
+    if readout_position in {
+        "last_prompt_token",
+        "first_answer_prefill",
+        "last_user_content_token",
+        "last_question_token",
+    }:
         return sequence_states[last_index].detach().cpu().float()
-    if readout_position == "last_4_prompt_mean":
+    if readout_position in {"last_4_prompt_mean", "last_user_content_4_mean", "last_question_4_mean"}:
         start = max(0, last_index - 3)
         return sequence_states[start : last_index + 1].mean(dim=0).detach().cpu().float()
-    if readout_position == "last_8_prompt_mean":
+    if readout_position in {"last_8_prompt_mean", "last_user_content_8_mean", "last_question_8_mean"}:
         start = max(0, last_index - 7)
         return sequence_states[start : last_index + 1].mean(dim=0).detach().cpu().float()
     raise NotImplementedError(f"Unsupported readout position: {readout_position}")
+
+
+def _readout_index_from_inputs(
+    bundle: VLMHFBundle,
+    inputs: Any,
+    readout_position: str,
+    user_text: str | None = None,
+    question_text: str | None = None,
+    prompt: str | None = None,
+) -> int:
+    last_index = int(inputs["attention_mask"][0].sum().item()) - 1
+    if readout_position in {
+        "last_question_token",
+        "last_question_4_mean",
+        "last_question_8_mean",
+    }:
+        if "_question_end_index" in inputs:
+            return min(int(inputs["_question_end_index"]), last_index)
+        if prompt is not None and question_text is not None:
+            return _prompt_user_content_end_index(prompt, question_text, bundle.tokenizer, last_index)
+        return last_index
+    if readout_position not in {
+        "last_user_content_token",
+        "last_user_content_4_mean",
+        "last_user_content_8_mean",
+    }:
+        return last_index
+    if "_user_content_end_index" in inputs:
+        return min(int(inputs["_user_content_end_index"]), last_index)
+    if prompt is not None and user_text is not None:
+        return _prompt_user_content_end_index(prompt, user_text, bundle.tokenizer, last_index)
+    return last_index
+
+
+def _prompt_user_content_end_index(
+    prompt: str,
+    user_text: str,
+    tokenizer: Any,
+    last_index: int,
+) -> int:
+    end_char = prompt.rfind(user_text)
+    if end_char < 0:
+        return last_index
+    end_char += len(user_text)
+    prefix = prompt[:end_char]
+    prefix_ids = tokenizer(prefix, return_tensors="pt")["input_ids"][0]
+    return max(0, min(int(prefix_ids.shape[0]) - 1, last_index))
+
+
+def _model_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in inputs.items() if not key.startswith("_")}
+
+
+def _greedy_generation_config(model: Any) -> Any:
+    config = getattr(model, "generation_config", None)
+    if config is None:
+        return None
+    config = copy.deepcopy(config)
+    config.do_sample = False
+    for key, value in {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 50,
+        "typical_p": 1.0,
+        "epsilon_cutoff": 0.0,
+        "eta_cutoff": 0.0,
+    }.items():
+        if hasattr(config, key):
+            setattr(config, key, value)
+    return config
 
 
 def _move_inputs(inputs: Any, device: str, dtype: torch.dtype | None = None) -> Any:

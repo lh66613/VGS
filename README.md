@@ -257,7 +257,24 @@ bash scripts/run_cpu_stage_j_controls.sh
 bash scripts/run_cpu_stage_k_positions.sh
 bash scripts/run_cpu_stage_l_evidence_subspace.sh
 bash scripts/run_cpu_stage_p_stats.sh
+bash scripts/run_cpu_stage_t_selective_correction.sh
+bash scripts/run_cpu_stage_t_selective_correction_fixed_ids.sh
 bash scripts/run_cpu_stage_q_paper_assets.sh
+```
+
+Stage T implements the selective-correction plan: it trains correction-geometry
+risk scores, calibrates gates on a held-out calibration split, evaluates
+predicted-Yes FP/TP routing, and writes verification prompt plans. The default
+script runs the strict POPE `random -> popular -> adversarial` transfer protocol;
+the `_fixed_ids` script uses the repository's fixed train/val/test split files.
+To actually run the second-pass verification prompts on the gated samples:
+
+```bash
+bash scripts/run_gpu_stage_t_verification.sh
+STAGE_T_DIR=outputs/stage_t_selective_correction_fixed_ids \
+TEST_SUBSET=test \
+SPLIT_DIR=outputs/splits \
+bash scripts/run_gpu_stage_t_prompt_sweep.sh
 ```
 
 ### 4. Run intervention and rescue studies
@@ -326,6 +343,7 @@ PHASE3_STEP=all bash scripts/run_phase3_cross_arch_all.sh
 | E/M | `outputs/interventions/`, `outputs/stage_m_local_rescue/` | Causal ablation and rescue probes |
 | N | `outputs/stage_n_external_full/` | AMBER external transfer |
 | O/Phase 3 | `outputs/stage_o_cross_model/` | LLaVA-13B and cross-architecture replication artifacts |
+| T | `outputs/stage_t_selective_correction*/` | Geometry-gated selective correction and verification plans |
 | R/S | `outputs/stage_r_semantics/`, `outputs/stage_s_baselines/` | Semantic fingerprints and baseline positioning |
 
 ## Claims and Non-Claims

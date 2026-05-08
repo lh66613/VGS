@@ -2443,3 +2443,85 @@ Top recommendation:
 Important limitation:
 
 - This is a prepared activation-editing direction bank, not a trained LoRA adapter and not an evaluated mitigation method.
+
+## 2026-05-06 Stage O Cross-Architecture Audit
+
+We audited the new Qwen/InternVL cross-architecture Stage O runs because the results looked suspiciously strong.
+
+Audit artifacts:
+
+- Cross-architecture audit note: `notes/stage_o_cross_arch_audit.md`
+- Split-locked probe sanity note: `notes/stage_o_probe_sanity.md`
+- Model summary: `outputs/stage_o_cross_model/audit/model_summary.csv`
+- Probe summary: `outputs/stage_o_cross_model/audit/probe_summary.csv`
+- Condition summary: `outputs/stage_o_cross_model/audit/condition_summary.csv`
+- Probe sanity CSV: `outputs/stage_o_cross_model/audit/probe_sanity.csv`
+
+What looks internally OK:
+
+- Prediction counts sum correctly.
+- Hidden-state sample counts match prediction counts.
+- Readout metadata is consistent across the new runs.
+- No unknown-output explosion appears in the four new cross-architecture models.
+
+Main problem:
+
+- The current cross-architecture `last_prompt_token` readout is at the assistant-generation prompt position.
+- For Qwen prompts, the tail is:
+  - `... Answer with yes or no only.<|im_end|>\n<|im_start|>assistant\n`
+- This position is directly used to predict the next answer token.
+- Because FP/TN labels are defined from the model's yes/no answer on ground-truth-no samples, this readout can linearly expose the answer decision.
+
+Evidence:
+
+- Non-LLaVA models show near-perfect FP/TN AUROC from `raw_img` hidden states:
+  - Qwen2-VL-7B raw image AUROC about `0.999`
+  - Qwen2.5-VL-7B raw image AUROC about `0.999`
+  - InternVL2 rows also approach `1.000`
+- `difference` and top-K SVD also approach `1.000`, unlike the LLaVA-7B/13B pattern.
+- First-token margin AUROC is also about `1.000`, which is expected because it is nearly the same decision used to define FP/TN.
+- Split-locked probe sanity checks confirm the effect persists under fixed train/test split, so this is not merely random split leakage.
+
+Conclusion:
+
+- The files are not obviously misaligned, but the current cross-architecture hidden-probe design is not equivalent to the original LLaVA mechanism experiment.
+- The current Qwen/InternVL results should be treated as answer-position diagnostics, not as evidence for cross-architecture blind-reference correction geometry.
+- Cross-architecture mechanism claims should be paused until hidden states are re-extracted with a readout that excludes assistant-generation prompt tokens.
+
+Recommended rerun:
+
+- Add or use a readout such as `last_user_content_token` or `last_user_content_4_mean`.
+- Rerun hidden extraction and CPU Stage O analysis for Qwen/InternVL.
+- Require `raw_img` not to be trivially perfect before interpreting `difference` or SVD coordinates as mechanism evidence.
+
+## 2026-05-06 Stage O User-Content Readout Preparation
+
+We implemented the corrected cross-architecture readout and prepared rerun scripts.
+
+Plan note:
+
+- `notes/stage_o_user_readout_rerun_plan.md`
+
+Code change:
+
+- `src/vgs/vlm_hf.py` now supports:
+  - `last_user_content_token`
+  - `last_user_content_4_mean`
+  - `last_user_content_8_mean`
+
+Prepared scripts:
+
+- GPU one-model runner: `scripts/run_gpu_phase3_cross_arch_user_readout.sh`
+- CPU one-model runner: `scripts/run_cpu_phase3_cross_arch_user_readout.sh`
+- Four-model runner: `scripts/run_phase3_cross_arch_user_readout_all.sh`
+- Post-CPU audit runner: `scripts/run_cpu_phase3_cross_arch_user_readout_audit.sh`
+
+Default output root:
+
+- `outputs/stage_o_cross_model_user_readout/{MODEL_ALIAS}/`
+
+Validation:
+
+- `src/vgs/vlm_hf.py` and audit scripts pass Python compilation.
+- New GPU/CPU shell scripts pass `bash -n`.
+- Qwen tokenizer sanity check confirms `last_user_content_token` lands on the final user-content period, not on `<|im_start|>assistant`.
