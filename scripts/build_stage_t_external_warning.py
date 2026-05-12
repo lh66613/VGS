@@ -20,10 +20,13 @@ DEFAULT_SCORES = [
     "tail_257_1024_probe",
     "full_probe",
     "top_4_probe",
+    "top_16_probe",
     "random64_probe",
     "tail_257_1024_energy",
     "margin_probe",
     "low_margin_probe",
+    "margin_plus_top_16_probe",
+    "low_margin_plus_top_16_probe",
     "margin_plus_pls32_probe",
     "margin_plus_tail_257_1024_probe",
     "margin_plus_full_probe",
@@ -86,7 +89,14 @@ def build_external_warning(
     target_keys = {_rate_key(rate) for rate in target_rates}
     gate = gate[gate["target_trigger_rate_predicted_yes"].map(_rate_key).isin(target_keys)].copy()
 
-    available_scores = [score for score in selected_scores if score in external.columns and score in set(gate["score"].astype(str))]
+    gate_scores = set(gate["score"].astype(str))
+    available_scores = [
+        score
+        for score in selected_scores
+        if score in external.columns
+        and score in gate_scores
+        and pd.to_numeric(external[score], errors="coerce").notna().any()
+    ]
     missing_scores = [score for score in selected_scores if score not in available_scores]
     external["parsed_prediction"] = external["parsed_prediction"].astype(str).str.lower()
     pred_yes = external[

@@ -3,6 +3,7 @@ import pandas as pd
 import torch
 
 from scripts.analyze_stage_t_vcd_results import analyze_vcd_results
+from scripts.build_stage_t_margin_geometry_ablation import build_margin_geometry_ablation
 from scripts.build_stage_t_external_warning import build_external_warning
 from scripts.build_stage_t_selective_warning import build_selective_warning_metrics
 from vgs.stage_t import (
@@ -129,6 +130,63 @@ def test_stage_t_vcd_analysis_scores_geometry_gate(tmp_path) -> None:
     assert pls["fp_reduction"] == 1.0
     assert pls["tp_preserved"] == 1.0
     assert pls["fp_reduction_per_trigger"] == 1.0
+
+
+def test_margin_geometry_ablation_uses_fixed_predicted_yes_budget(tmp_path) -> None:
+    stage_t_dir = tmp_path / "stage_t"
+    stage_t_dir.mkdir()
+    required_scores = {
+        "low_margin_probe": [0.9, 0.1, 0.0, 0.0],
+        "full_probe": [0.1, 0.9, 0.0, 0.0],
+        "pls32_probe": [0.8, 0.2, 0.0, 0.0],
+        "tail_257_1024_probe": [0.7, 0.3, 0.0, 0.0],
+        "low_margin_plus_full_probe": [0.9, 0.1, 0.0, 0.0],
+        "low_margin_plus_pls32_probe": [0.8, 0.2, 0.0, 0.0],
+        "low_margin_plus_tail_257_1024_probe": [0.7, 0.3, 0.0, 0.0],
+    }
+    pd.DataFrame(
+        {
+            "layer": [24, 24, 24, 24],
+            "sample_id": ["s1", "s2", "s3", "s4"],
+            "subset": ["test", "test", "test", "test"],
+            "outcome": ["FP", "TP", "TN", "FN"],
+            "parsed_prediction": ["yes", "yes", "no", "no"],
+            **required_scores,
+        }
+    ).to_csv(stage_t_dir / "stage_t_scores.csv", index=False)
+    (stage_t_dir / "stage_t_vcd_predictions_icd_blind.jsonl").write_text(
+        "\n".join(
+            [
+                '{"sample_id":"s1","vcd_parsed_prediction":"no","vcd_outcome":"TN"}',
+                '{"sample_id":"s2","vcd_parsed_prediction":"no","vcd_outcome":"FN"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = build_margin_geometry_ablation(
+        stage_t_dir=stage_t_dir,
+        scores_path=None,
+        output_dir=tmp_path / "out",
+        layer=24,
+        test_subset="test",
+        target_rates=[0.5],
+        operators=["icd_blind"],
+        random_repeats=3,
+        seed=1,
+    )
+
+    df = pd.read_csv(result["csv_path"])
+    margin = df[df["gate"] == "Margin-only"].iloc[0]
+    full = df[df["gate"] == "Geometry-only full"].iloc[0]
+    assert margin["trigger_n"] == 1
+    assert margin["fp_recall"] == 1.0
+    assert margin["tp_damage"] == 0.0
+    assert margin["icd_vcd_fp_reduction"] == 1.0
+    assert margin["accuracy_delta"] == 0.25
+    assert full["fp_recall"] == 0.0
+    assert full["tp_damage"] == 1.0
 
 
 def test_warning_random_rows_use_group_total_when_matched_gate_has_zero_fp(tmp_path) -> None:

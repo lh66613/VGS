@@ -654,6 +654,85 @@ Recommended writeup framing:
 - limitation: strongest utility evidence is fixed-split held-out POPE; strict
   subset-transfer and AMBER stress tests are supportive but weaker.
 
+## Fixed-Trigger Margin-vs-Geometry Ablation
+
+This is the reviewer-facing ablation for the question:
+
+```text
+Does low-margin+geometry work because geometry adds information, or is
+low-margin alone enough?
+```
+
+Generated outputs:
+
+- `outputs/stage_t_selective_correction_fixed_ids/stage_t_margin_geometry_fixed_trigger_ablation.csv`
+- `outputs/stage_t_selective_correction_fixed_ids/stage_t_margin_geometry_fixed_trigger_ablation.md`
+
+Command:
+
+```bash
+python scripts/build_stage_t_margin_geometry_ablation.py \
+  --stage-t-dir outputs/stage_t_selective_correction_fixed_ids \
+  --target-rates 0.1 0.2 0.3 \
+  --operators all \
+  --random-repeats 1000
+```
+
+Protocol: fixed-split held-out POPE test, L24, predicted-`Yes` pool only
+(`596` samples; `53` FPs, `543` TPs). Each gate triggers the exact same top-rate
+budget within that predicted-`Yes` pool. `Margin-only` means low
+`Yes-No` margin (`low_margin_probe`), and `Margin + ...` means the corresponding
+`low_margin_plus_*` score.
+
+Canonical `icd_blind` result:
+
+| Target | Gate | FP Recall | TP Damage | Warning Precision | ICD/VCD FP Reduction | TP Preserved | Accuracy Delta |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.10 | Random | 0.100 | 0.101 | 0.088 | 0.033 | 0.991 | -0.002 |
+| 0.10 | Margin-only | 0.396 | 0.072 | 0.350 | 0.245 | 0.958 | -0.007 |
+| 0.10 | Geometry-only full | 0.377 | 0.074 | 0.333 | 0.189 | 0.993 | +0.004 |
+| 0.10 | Geometry-only PLS | 0.302 | 0.081 | 0.267 | 0.189 | 0.991 | +0.004 |
+| 0.10 | Geometry-only tail | 0.358 | 0.076 | 0.317 | 0.170 | 0.993 | +0.004 |
+| 0.10 | Margin + full | 0.434 | 0.068 | 0.383 | 0.208 | 0.993 | +0.005 |
+| 0.10 | Margin + PLS | 0.434 | 0.068 | 0.383 | 0.264 | 0.982 | +0.003 |
+| 0.10 | Margin + tail | 0.434 | 0.068 | 0.383 | 0.208 | 0.983 | +0.001 |
+| 0.20 | Random | 0.204 | 0.201 | 0.090 | 0.068 | 0.982 | -0.004 |
+| 0.20 | Margin-only | 0.660 | 0.157 | 0.292 | 0.321 | 0.930 | -0.016 |
+| 0.20 | Geometry-only full | 0.453 | 0.177 | 0.200 | 0.208 | 0.987 | +0.003 |
+| 0.20 | Geometry-only PLS | 0.509 | 0.171 | 0.225 | 0.245 | 0.980 | +0.001 |
+| 0.20 | Geometry-only tail | 0.472 | 0.175 | 0.208 | 0.208 | 0.982 | +0.001 |
+| 0.20 | Margin + full | 0.679 | 0.155 | 0.300 | 0.340 | 0.954 | -0.005 |
+| 0.20 | Margin + PLS | 0.679 | 0.155 | 0.300 | 0.321 | 0.965 | -0.001 |
+| 0.20 | Margin + tail | 0.642 | 0.158 | 0.283 | 0.302 | 0.969 | -0.001 |
+| 0.30 | Random | 0.298 | 0.301 | 0.088 | 0.101 | 0.974 | -0.007 |
+| 0.30 | Margin-only | 0.830 | 0.249 | 0.246 | 0.340 | 0.923 | -0.018 |
+| 0.30 | Geometry-only full | 0.491 | 0.282 | 0.145 | 0.245 | 0.982 | +0.002 |
+| 0.30 | Geometry-only PLS | 0.623 | 0.269 | 0.184 | 0.283 | 0.974 | +0.001 |
+| 0.30 | Geometry-only tail | 0.566 | 0.274 | 0.168 | 0.264 | 0.980 | +0.002 |
+| 0.30 | Margin + full | 0.811 | 0.250 | 0.240 | 0.340 | 0.926 | -0.016 |
+| 0.30 | Margin + PLS | 0.849 | 0.247 | 0.251 | 0.340 | 0.932 | -0.014 |
+| 0.30 | Margin + tail | 0.774 | 0.254 | 0.229 | 0.340 | 0.937 | -0.012 |
+
+Interpretation:
+
+- Low-margin is a very strong baseline. The application claim should not say
+  geometry dominates margin.
+- Geometry adds useful information at the low trigger budget: at 10%, all
+  low-margin+geometry gates improve FP recall and warning precision over
+  margin-only while slightly reducing TP damage.
+- At 20%-30%, the incremental FP-recall gain is modest and score-dependent:
+  `Margin + PLS` is the most consistent, `Margin + full` helps at 20%, and
+  `Margin + tail` is weaker on POPE fixed split.
+- For actual ICD/VCD correction, low-margin maximizes FP reduction but often
+  damages TP/accuracy. Geometry-only gates give a safer operating point:
+  lower FP reduction, but high TP preservation and near-zero or positive
+  accuracy delta.
+
+Recommended paper stance: keep Stage T as a modest utility result, not as the
+main contribution. The robust claim is complementarity/tradeoff: margin drives
+high FP capture, while geometry improves low-budget warning precision and
+offers TP-preserving routing choices.
+
 ## Stress-Test Results
 
 Two follow-up stress tests are complete.

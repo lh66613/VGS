@@ -11,7 +11,7 @@ MARGIN_SCORES="${MARGIN_SCORES:-${MARGIN_DIR}/pope_margin_scores.csv}"
 STAGE_T_DIR="${STAGE_T_DIR:-outputs/stage_t_selective_correction_fixed_ids}"
 SPLIT_DIR="${SPLIT_DIR:-outputs/splits}"
 TEST_SUBSET="${TEST_SUBSET:-test}"
-TARGET_RATES="${TARGET_RATES:-0.2 0.3}"
+TARGET_RATES="${TARGET_RATES:-0.1 0.2 0.3}"
 VCD_OPERATORS="${VCD_OPERATORS:-vcd_diffusion vcd_gray icd_blind vcd_blur}"
 FORCE_RERUN="${FORCE_RERUN:-0}"
 
@@ -58,3 +58,8 @@ done
 "${PYTHON_BIN}" scripts/build_stage_t_vcd_operator_comparison.py \
   --stage-t-dir "${STAGE_T_DIR}" \
   --target-rates ${TARGET_RATES}
+
+"${PYTHON_BIN}" scripts/build_stage_t_margin_geometry_ablation.py \
+  --stage-t-dir "${STAGE_T_DIR}" \
+  --target-rates ${TARGET_RATES} \
+  --operators all

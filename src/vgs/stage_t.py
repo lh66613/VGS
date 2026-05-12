@@ -21,6 +21,7 @@ from vgs.io import ensure_dir, write_csv, write_jsonl
 
 
 ScoreFn = Callable[[np.ndarray], np.ndarray]
+ExternalScoreFn = Callable[[np.ndarray, list[dict[str, Any]]], np.ndarray]
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class ScoreModel:
     family: str
     scorer: ScoreFn
     train_orientation: float = 1.0
+    external_scorer: ExternalScoreFn | None = None
 
 
 def analyze_stage_t_selective_correction(
@@ -204,12 +206,13 @@ def analyze_stage_t_selective_correction(
             external_diff = (
                 external_hidden["z_blind"].float() - external_hidden["z_img"].float()
             ).numpy()
-            external_metadata = [_metadata_row(external_by_id[sample_id], {}, {}) for sample_id in external_ids]
+            external_metadata = [
+                _metadata_row(external_by_id[sample_id], margin_by_id.get(sample_id, {}), {})
+                for sample_id in external_ids
+            ]
             external_scores = {
-                name: model.scorer(external_diff)
+                name: _score_external_model(model, external_diff, external_metadata)
                 for name, model in score_models.items()
-                if model.family
-                not in {"output_margin", "margin_plus_geometry", "low_output_margin", "low_margin_plus_geometry"}
             }
             for local_idx, sample_id in enumerate(external_ids):
                 row = {
@@ -474,6 +477,8 @@ def _fit_score_models(
                 scorer=lambda _x, meta=layer_metadata, s=sign: s
                 * np.array([row["yes_minus_no_logit"] for row in meta], dtype=float),
                 train_orientation=sign,
+                external_scorer=lambda _x, meta, s=sign: s
+                * np.array([row["yes_minus_no_logit"] for row in meta], dtype=float),
             )
             audit_rows.append(
                 {
@@ -496,6 +501,10 @@ def _fit_score_models(
                     dtype=float,
                 ),
                 train_orientation=-1.0,
+                external_scorer=lambda _x, meta: -np.array(
+                    [row["yes_minus_no_logit"] for row in meta],
+                    dtype=float,
+                ),
             )
             audit_rows.append(
                 {
@@ -526,18 +535,25 @@ def _fit_score_models(
                     mc=margin_center,
                     ms=margin_scale,
                 ) -> np.ndarray:
-                    geo_z = (geo.scorer(x) - gc) / gs
-                    margin_z = (
-                        margin_sign
-                        * np.array([row["yes_minus_no_logit"] for row in meta], dtype=float)
-                        - mc
-                    ) / ms
-                    return geo_z + margin_z
+                    return _margin_plus_geometry_scores(x, meta, geo, margin_sign, gc, gs, mc, ms)
+
+                def external_scorer(
+                    x: np.ndarray,
+                    meta: list[dict[str, Any]],
+                    geo=models[geo_name],
+                    margin_sign=sign,
+                    gc=geo_center,
+                    gs=geo_scale,
+                    mc=margin_center,
+                    ms=margin_scale,
+                ) -> np.ndarray:
+                    return _margin_plus_geometry_scores(x, meta, geo, margin_sign, gc, gs, mc, ms)
 
                 models[f"margin_plus_{geo_name}"] = ScoreModel(
                     name=f"margin_plus_{geo_name}",
                     family="margin_plus_geometry",
                     scorer=scorer,
+                    external_scorer=external_scorer,
                 )
                 low_margin_scores_train = -margin_train
                 low_margin_center, low_margin_scale = _center_scale(low_margin_scores_train)
@@ -551,20 +567,56 @@ def _fit_score_models(
                     mc=low_margin_center,
                     ms=low_margin_scale,
                 ) -> np.ndarray:
-                    geo_z = (geo.scorer(x) - gc) / gs
-                    margin_z = (
-                        -np.array([row["yes_minus_no_logit"] for row in meta], dtype=float)
-                        - mc
-                    ) / ms
-                    return geo_z + margin_z
+                    return _margin_plus_geometry_scores(x, meta, geo, -1.0, gc, gs, mc, ms)
+
+                def external_low_scorer(
+                    x: np.ndarray,
+                    meta: list[dict[str, Any]],
+                    geo=models[geo_name],
+                    gc=geo_center,
+                    gs=geo_scale,
+                    mc=low_margin_center,
+                    ms=low_margin_scale,
+                ) -> np.ndarray:
+                    return _margin_plus_geometry_scores(x, meta, geo, -1.0, gc, gs, mc, ms)
 
                 models[f"low_margin_plus_{geo_name}"] = ScoreModel(
                     name=f"low_margin_plus_{geo_name}",
                     family="low_margin_plus_geometry",
                     scorer=low_scorer,
+                    external_scorer=external_low_scorer,
                 )
 
     return models, audit_rows
+
+
+def _score_external_model(
+    model: ScoreModel,
+    diff: np.ndarray,
+    metadata: list[dict[str, Any]],
+) -> np.ndarray:
+    if model.external_scorer is not None:
+        return model.external_scorer(diff, metadata)
+    return model.scorer(diff)
+
+
+def _margin_plus_geometry_scores(
+    x: np.ndarray,
+    metadata: list[dict[str, Any]],
+    geo: ScoreModel,
+    margin_sign: float,
+    geo_center: float,
+    geo_scale: float,
+    margin_center: float,
+    margin_scale: float,
+) -> np.ndarray:
+    geo_z = (geo.scorer(x) - geo_center) / geo_scale
+    margin_z = (
+        margin_sign
+        * np.array([row["yes_minus_no_logit"] for row in metadata], dtype=float)
+        - margin_center
+    ) / margin_scale
+    return geo_z + margin_z
 
 
 def _fit_logistic_model(
