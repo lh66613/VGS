@@ -16,14 +16,17 @@ from vgs.config import config_get, load_config
 from vgs.datasets import PopeSample
 from vgs.io import append_experiment_log, write_json, write_jsonl
 from vgs.pope import classify_outcome, parse_yes_no
-from vgs.vcd import generate_llava_contrastive_answer
+from vgs.vcd import generate_llava_contrastive_answer, official_vcd_reference
 from vgs.vlm_hf import MODEL_FAMILIES, load_vlm_hf
 
 
 OPERATORS = {
-    "vcd_diffusion": "Contrast original image logits against diffusion-noised image tensors.",
-    "vcd_blur": "Contrast original image logits against a Gaussian-blurred image.",
-    "vcd_gray": "Contrast original image logits against a grayscale image.",
+    "vcd_diffusion": (
+        "Official VCD baseline: contrast original image logits against "
+        "diffusion-noised image tensors."
+    ),
+    "vcd_blur": "VCD-style ablation: contrast original image logits against a Gaussian-blurred image.",
+    "vcd_gray": "VCD-style ablation: contrast original image logits against a grayscale image.",
     "icd_blind": "Contrast original image logits against a text-only blind prompt.",
 }
 
@@ -74,6 +77,7 @@ def main() -> None:
         "vcd_samples": args.vcd_samples,
         "operator": args.operator,
         "operator_description": OPERATORS[args.operator],
+        "implementation_reference": official_vcd_reference() if args.operator == "vcd_diffusion" else None,
         "alpha": args.alpha,
         "beta": args.beta,
         "blur_radius": args.blur_radius,

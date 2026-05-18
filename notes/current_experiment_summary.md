@@ -1,805 +1,358 @@
-下面我给你一版优化后的计划书，重点修正五点：
+# VGS 最新实验系统性技术总结
 
-1. 明确 probe / calibration / test 划分，避免泄露；
-2. 明确 gate 部署对象是“模型预测 Yes 的样本”，因此必须评估 TP Damage；
-3. 强调 geometry gate 的价值不是 verification prompt 本身，而是“比 random/margin 更精准地选择该修正的样本”；
-4. 实验分成必做、应做、有余力再做；
-5. 贡献表述从“routing”升级为“complementary risk signal”。
+> 生成日期：2026-05-18  
+> 数据截止：本仓库已落盘结果，最新关键产物为 2026-05-14 的 LLaVA-13B minimal replication，以及 2026-05-13 的 mechanism mitigation paper tables。  
+> 主模型：LLaVA-1.5-7B；补充模型：LLaVA-1.5-13B、Qwen2-VL-7B、Qwen2.5-VL-7B、InternVL2-8B、InternVL2.5-8B。  
+> 主基准：POPE COCO；外部基准：AMBER discriminative。
 
----
+## 一、汇报级结论
 
-# 计划书 v2：Correction-Geometry Guided Selective Correction
+本阶段实验已经从“发现 correction geometry”推进到“用该几何解释并改进 VCD/ICD 缓解”的闭环。当前最稳妥的主结论是：
 
-## 1. 核心目标
+> Blind-reference correction geometry 不是一个可以替代输出置信度的万能检测器，而是一个可解释、可选择、可过滤的内部风险信号。它揭示了 VCD/ICD correction 中哪些子空间更接近 hallucination-relevant 成分，并能在 POPE 固定划分上改善 FP reduction 与 TP preservation 的权衡。
 
-本文不把 correction geometry 写成一个强检测器，也不把它写成可靠 mitigation 方法，而是将其落实为一种**选择性修正策略**：
+当前最强正结果是 LLaVA-1.5-7B / POPE fixed split 上的 subspace-filtered ICD：
 
-> Correction geometry provides a complementary internal risk signal to output confidence, enabling selective verification or contrastive correction with lower false-trigger rates than margin-based or random routing.
+| 方法 | FP reduction | TP preserved | Accuracy delta | 说明 |
+| --- | ---: | ---: | ---: | --- |
+| Full VCD-diffusion | 0.151 | 0.971 | -0.008 | TP-safe，但 FP reduction 弱 |
+| Tail VCD-diffusion | 0.264 | 0.961 | -0.005 | 过滤后优于 full VCD |
+| Full ICD TP-safe | 0.283 | 0.972 | 0.000 | 安全 full-space ICD baseline |
+| Always ICD | 0.340 | 0.912 | -0.022 | FP reduction 强，但 TP damage 明显 |
+| Gated ICD | 0.340 | 0.937 | -0.012 | 约 30% routed，低于 always-on 的 TP damage |
+| **Band5-16 ICD** | **0.396** | **0.959** | **+0.001** | 当前最佳 TP-safe 结果 |
 
-中文理解：
+因此，最适合汇报的技术路线是：
 
-> 校正几何提供了一个与输出置信度互补的内部风险信号，可以帮助我们判断哪些样本需要额外验证或对比解码，从而减少不必要的干预，并尽量降低对正确 Yes 样本的误伤。
+1. **机制发现**：blind-reference difference 的 dominant variance directions 与 hallucination discrimination 解耦；有效判别信息更多出现在 residual/tail、PLS/Fisher、band 5-16 / top-complement 等非 dominant backbone 成分中。
+2. **检测与路由**：输出 low-margin 是最强全局风险信号；geometry 与 margin 低度到中度相关，能在低触发预算、margin-missed residual pool、same-margin cases 中提供互补排序信息。
+3. **缓解闭环**：prompt verification 较弱；always-on VCD/ICD 能减少 FP 但伤 TP；geometry-gated VCD/ICD 与 subspace-filtered ICD 能把 correction 用在更合适的样本或子空间上。
+4. **边界条件**：跨模型上机制现象不完全一致；LLaVA/Qwen 支持 variance-discrimination decoupling，InternVL 出现“FP/TN 内部分离近乎完美但 predicted-Yes FP/TP 不可部署”的边界案例；LLaVA-13B minimal 复现为方向性支持，但 mitigation 尚不稳定。
 
-这个目标和你已有发现是匹配的：你已经证明 top variance 不是 hallucination decision geometry，FP/TN 信号更多分布在 full difference、PLS/Fisher、residual/tail coordinates 中；但同时你也知道 logits margin 很强、FP rescue 不可靠，所以落地方式必须是“选择性处理”，而不是“强行全局修复”。
+## 二、核心定义与指标
 
----
-
-# 2. 方法设计
-
-## 2.1 基本表示
-
-对每个样本提取两种 hidden state：
+每个样本提取 image-conditioned 和 blind/text-only 两个 hidden state：
 
 ```text
 z_img   = hidden_state(image + question)
 z_blind = hidden_state(question only)
+d       = z_blind - z_img
 ```
 
-定义 blind-reference correction difference：
-
-```text
-d = z_blind - z_img
-```
-
-主层使用：
-
-```text
-L24
-```
-
-辅助层：
-
-```text
-L20 / L32
-```
-
-L24 作为主层，是因为你已有结果中 L24 full difference、PLS、tail ablation 都比较关键；L32 可以作为 late-layer arbitration 的补充。
-
----
-
-## 2.2 Geometry risk score
-
-建议保留三个主分数，不要太多。
-
-### Score A：Full-Difference Risk
-
-```text
-s_full = Logistic(d)
-```
-
-训练任务仍然是：
-
-```text
-FP vs TN
-```
-
-也就是在 ground-truth = No 的样本中区分：
-
-```text
-FP: 模型错误回答 Yes
-TN: 模型正确回答 No
-```
-
-但这里要明确：**这个 probe 只是学习“错误 Yes 与正确 No 的内部差异”，部署时不能假设 ground truth 已知。**
-
----
-
-### Score B：Tail / Residual Risk
-
-对差分矩阵 `D` 做 SVD，取 residual/tail band：
-
-```text
-P_tail(d) = SVD coordinates 257-1024
-```
-
-构造：
-
-```text
-s_tail_energy = ||P_tail(d)||²
-s_tail_probe  = Logistic(P_tail(d))
-```
-
-这对应你的机制发现：matched evidence 与 mismatch 的差异更明显体现在 residual/tail，而不是 top variance backbone。
-
----
-
-### Score C：PLS / Fisher Risk
-
-```text
-s_pls = w_pls^T d
-```
-
-主设定可以用：
-
-```text
-L24, K=32 PLS
-```
-
-因为 PLS/Fisher 可以作为更 compact 的 FP/TN decision subspace，但它的稳定性可能弱于 full difference，所以建议作为对照分数，而不是唯一主分数。
-
----
-
-# 3. Gate 设计：必须对齐真实部署场景
-
-这是计划书 v2 最重要的修改。
-
-## 3.1 实际部署时你知道什么？
-
-真实部署时你不知道 ground truth。你只知道：
-
-```text
-模型预测 Yes 或 No
-模型输出 margin / entropy
-geometry risk score
-```
-
-对于 POPE object hallucination，最重要的是：
-
-```text
-模型预测 Yes 的样本 = TP + FP
-```
-
-你的 gate 面对的是：
-
-```text
-TP: 正确 Yes
-FP: 错误 Yes，即幻觉
-```
-
-所以 gate 的真正目标不是单纯区分 FP/TN，而是：
-
-> 在模型预测 Yes 的样本中，尽量触发 FP，尽量不要触发 TP。
-
-因此，实验中必须把 **TP Damage** 提升为核心指标。
-
----
-
-## 3.2 Gate 公式
-
-最小版本：
-
-```text
-G_geo(x) = 1 if model predicts Yes and s_geo(x) > τ_geo
-```
-
-组合版本：
-
-```text
-G_margin+geo(x) = 1 if model predicts Yes and 
-                  (s_geo(x) > τ_geo or margin is uncertain / suspicious)
-```
-
-也可以测试更严格版本：
-
-```text
-G_strict(x) = 1 if model predicts Yes and 
-              s_geo(x) > τ_geo and margin_yes > τ_margin
-```
-
-解释：
-
-* `model predicts Yes`：只在可能发生 object hallucination 的样本上触发；
-* `s_geo(x) > τ_geo`：内部 correction geometry 显示视觉证据修正异常；
-* `margin`：输出置信度信号，用于和 geometry 做互补。
-
----
-
-# 4. 数据划分与阈值校准
-
-这部分必须写清楚。
-
-建议使用下面这种清晰划分：
-
-## 方案 A：按 POPE subset 划分
-
-```text
-Probe Train: POPE random
-Calibration: POPE popular
-Test: POPE adversarial
-External: AMBER
-```
-
-用途：
-
-| 数据               | 用途                                     |
-| ---------------- | -------------------------------------- |
-| POPE random      | 训练 FP/TN probe、SVD subspace、PLS/Fisher |
-| POPE popular     | 选择 gate 阈值 τ，选择 trigger rate           |
-| POPE adversarial | 固定所有参数后最终测试                            |
-| AMBER            | 外部验证                                   |
-
-优点：最干净，容易向审稿人解释。
-
-缺点：random/popular/adversarial 分布不同，可能会让训练更难，但这反而更严格。
-
----
-
-## 方案 B：按每个 subset 内部划分
-
-如果你担心用 random 训练、adversarial 测试太难，也可以：
-
-```text
-Train: 每个 subset 的 50%
-Calibration: 每个 subset 的 20%
-Test: 每个 subset 的 30%
-```
-
-但要保证：
-
-```text
-训练 probe 的样本 ≠ 选择 τ 的样本 ≠ 最终测试样本
-```
-
-我更推荐方案 A，因为更清楚，也更能支撑 generalization。
-
----
-
-# 5. 触发后的处理方式
-
-## 5.1 必做：Geometry-Gated Verification
-
-如果：
-
-```text
-G(x) = 0
-```
-
-保留原始回答。
-
-如果：
-
-```text
-G(x) = 1
-```
-
-触发 verification prompt：
-
-```text
-Please verify the visual evidence before answering.
-Answer "Yes" only if the queried object is clearly visible in the image.
-If the visual evidence is insufficient or unclear, answer "No".
-
-Question: {question}
-```
-
-这里要明确分离两个贡献：
-
-### 贡献 1：Verification prompt 本身是否有效？
-
-比较：
-
-```text
-Original vs Always Verification
-```
-
-这说明“换 prompt 重新检查”本身能不能降低 FP。
-
-### 贡献 2：Geometry gate 是否精准？
-
-比较：
-
-```text
-Geometry-gated Verification vs Random-gated Verification
-```
-
-要求它们有相同 trigger rate。
-
-这才是你的真正贡献：
-
-> 在同样只触发 20% 样本的情况下，geometry gate 是否比 random gate 找到了更多 FP、更少误伤 TP？
-
----
-
-## 5.2 有余力再做：Geometry-Gated VCD / ICD
-
-如果 gated verification 有正结果，再做 VCD/ICD。
-
-不要先做 hidden-state filtered decoding，工程风险太高。先做 gated VCD：
-
-```text
-G(x) = 0: 原始 greedy decoding
-G(x) = 1: 使用 VCD / ICD
-```
-
-核心比较：
-
-```text
-Original
-Always-on VCD
-Margin-gated VCD
-Geometry-gated VCD
-Margin+Geometry-gated VCD
-Random-gated VCD
-```
-
-重点不是超过 always-on VCD，而是：
-
-> 用更低 trigger rate 达到接近的 FP reduction，或者在相同 FP reduction 下减少 TP damage / 额外计算。
-
----
-
-# 6. 核心指标
-
-## 6.1 Gate 精准性指标
-
-这是最重要的一组。
-
-| 指标                            | 含义               |
-| ----------------------------- | ---------------- |
-| Trigger Rate                  | 触发比例             |
-| Triggered FP Ratio            | 触发样本里 FP 占比      |
-| FP Recall among predicted-Yes | 在所有 FP 中抓住了多少    |
-| TP Damage                     | 被误触发的 TP 比例      |
-| Precision of Gate             | 触发样本中真正需要修正的比例   |
-| FP Reduction per Trigger      | 每触发一个样本带来的 FP 降低 |
-
-其中最关键的是：
-
-```text
-FP Reduction ↑
-TP Damage ↓
-```
-
-你要把它们并列作为主指标。
-
----
-
-## 6.2 最终回答质量指标
-
-| 指标            | 含义                       |
-| ------------- | ------------------------ |
-| Accuracy      | 总准确率                     |
-| F1            | yes/no 平衡性能              |
-| Precision     | Yes 回答的可靠性               |
-| Recall        | 正确 Yes 保留程度              |
-| FP Rate       | 幻觉率                      |
-| TN Preserved  | 正确 No 是否保留               |
-| TP Preserved  | 正确 Yes 是否保留              |
-| Extra Compute | 额外 forward / decoding 成本 |
-
-注意：
-如果 verification prompt 降低 FP 但大量伤害 TP，不能说方法成功。你要强调 trade-off。
-
----
-
-# 7. 必做实验
-
-## 实验 1：Geometry 是否补充 margin？
-
-这是最小闭环第一步。
-
-比较：
-
-```text
-margin-only
-geometry-only
-margin + geometry
-```
-
-建议 geometry 分数只选三个：
-
-```text
-s_full
-s_tail_probe
-s_pls
-```
-
-指标：
-
-```text
-AUROC
-AUPRC
-Risk-Coverage AUC
-FP@fixed coverage
-TP Damage under predicted-Yes gate
-```
-
-注意：
-这里不能只看 FP/TN AUROC。必须额外看：
-
-```text
-在 predicted-Yes = TP + FP 子集上，
-geometry 能不能区分 FP 和 TP？
-```
-
-这正是那份意见指出的漏洞。
-
----
-
-## 实验 2：Gated Verification 主实验
-
-触发率建议固定三个：
-
-```text
-10%
-20%
-30%
-```
-
-在每个触发率下比较：
-
-```text
-Random-gated Verification
-Margin-gated Verification
-Geometry-gated Verification
-Margin+Geometry-gated Verification
-```
-
-主结论优先级：
-
-### 第一优先级
-
-```text
-Geometry-gated 是否在相同 trigger rate 下比 Random-gated 抓住更多 FP、误伤更少 TP？
-```
-
-### 第二优先级
-
-```text
-Geometry-gated 是否优于 Margin-gated？
-```
-
-### 第三优先级
-
-```text
-Margin+Geometry 是否优于 Margin-only？
-```
-
-这个顺序很重要。因为你的方法不一定总能打败 margin，但至少应该比 random gate 显著更精准。
-
----
-
-## 实验 3：Gate 来源消融
-
-比较：
-
-```text
-Top-4 SVD gate
-Tail 257-1024 gate
-Full-difference gate
-PLS/Fisher gate
-Random-subspace gate
-```
-
-目标：
-
-> 证明不是任意 hidden feature 都能 gate，而是 residual/tail/full-difference 这些由机制分析识别出的坐标更有效。
-
-这能直接呼应你的核心发现：
-
-> dominant variance directions are not decision geometry.
-
-如果 top-4 gate 明显弱，而 tail/full/PLS gate 更好，这就是非常漂亮的“机制指导方法设计”证据。
-
----
-
-# 8. 应做实验
-
-## 实验 4：Margin-bin / Overconfidence 分析
-
-按 yes/no margin 分桶：
-
-```text
-low-margin
-medium-margin
-high-margin
-```
-
-在每个桶里分析：
-
-```text
-geometry score 的 FP/TP 区分能力
-geometry-gated 的 FP recall
-geometry-gated 的 TP damage
-```
-
-预期有三种写法。
-
-### 理想情况
-
-如果 high-margin FP 中 geometry 仍有效：
-
-> correction geometry detects overconfident hallucinations missed by output confidence.
-
-### 中等情况
-
-如果主要在 medium-margin 样本有效：
-
-> correction geometry is most useful for boundary-near hallucination handling.
-
-### 较差情况
-
-如果没有明显分桶优势：
-
-> geometry provides limited complementarity to output confidence, suggesting that hidden correction geometry and output confidence are partially aligned in this setting.
-
----
-
-## 实验 5：LLaVA-1.5-13B 复现
-
-你已有 13B 相关结果，可以低成本补一张表：
-
-```text
-7B gate result vs 13B gate result
-```
-
-重点看：
-
-```text
-top-4 gate 是否仍弱
-tail/full/PLS gate 是否仍更有效
-geometry-gated 是否仍比 random-gated 精准
-```
-
-这能把结论从 7B 稍微推到 checkpoint-level recurrence。你的已有总结里也说明，13B 复现了 full difference 强、top-4 弱、tail gap 存在这些 qualitative pattern。
-
----
-
-# 9. 有余力再做实验
-
-## 实验 6：Gated VCD / ICD
-
-只有在 Gated Verification 有效果后再做。
-
-比较：
-
-```text
-Original
-Always VCD
-Random-gated VCD
-Margin-gated VCD
-Geometry-gated VCD
-Margin+Geometry-gated VCD
-```
-
-核心指标：
-
-```text
-FP Reduction
-TP Damage
-Trigger Rate
-Extra Compute
-FP Reduction per Trigger
-```
-
----
-
-## 实验 7：AMBER 外部验证
-
-用 POPE 学到的 score / threshold，在 AMBER 上测试：
-
-```text
-risk transfer
-predicted-positive risk
-gated verification
-```
-
-语气要克制。你已有 AMBER transfer 是 above-chance but modest，不适合写成强泛化。
-
----
-
-## 实验 8：Qwen2-VL / InternVL
-
-如果想冲更高上限，再补一个跨架构模型。
-
-最小只跑：
-
-```text
-top-4 vs full/tail risk
-predicted-Yes FP/TP gate precision
-gated verification at 10/20/30%
-```
-
-不要一开始做完整 intervention。
-
----
-
-# 10. 实验优先级总表
-
-## 必做
-
-| 实验                                    | 目的                           |
-| ------------------------------------- | ---------------------------- |
-| margin vs geometry vs margin+geometry | 证明 geometry 是否有互补风险信号        |
-| predicted-Yes 子集 FP/TP 分析             | 修复 probe 训练目标与部署场景不匹配的问题     |
-| Gated Verification                    | 证明 geometry gate 有实际 utility |
-| Random gate 对照                        | 证明不是随机触发就有效                  |
-| Top-4 vs tail/full/PLS gate           | 证明机制发现能指导 gate 设计            |
-
----
-
-## 应做
-
-| 实验                    | 目的                             |
-| --------------------- | ------------------------------ |
-| Margin-bin analysis   | 说明 geometry 在哪类样本上有价值          |
-| LLaVA-1.5-13B gate 复现 | 增强 checkpoint-level generality |
-
----
-
-## 有余力再做
-
-| 实验                  | 目的     |
-| ------------------- | ------ |
-| Gated VCD / ICD     | 更强落地版本 |
-| AMBER               | 外部验证   |
-| Qwen2-VL / InternVL | 跨架构泛化  |
-
----
-
-# 11. 最小可执行闭环
-
-你现在最应该先做这个闭环：
-
-```text
-1. 用 POPE random 训练 full/tail/PLS geometry risk。
-2. 用 POPE popular 选 threshold，使 trigger rate = 10%、20%、30%。
-3. 在 POPE adversarial 上测试 predicted-Yes 子集中的：
-   - FP recall
-   - TP damage
-   - gate precision
-4. 做 Gated Verification：
-   - random gate
-   - margin gate
-   - geometry gate
-   - margin+geometry gate
-5. 做 top-4 vs tail/full/PLS gate 消融。
-```
-
-如果这个闭环成立，你就能写出一个非常清楚的落地贡献：
-
-> Correction geometry provides a complementary risk signal to output confidence and enables selective verification that catches more hallucinated Yes responses with lower TP damage than random or top-variance routing.
-
----
-
-# 12. 最终论文贡献表述
-
-建议改成四条：
-
-1. We introduce blind-reference differencing to analyze visual-evidence correction geometry in LVLMs.
-2. We show that dominant variance directions are not hallucination decision directions.
-3. We identify residual/tail correction coordinates that are evidence-sensitive and causally relevant to faithful negative decisions.
-4. We show that correction geometry provides complementary risk signal to output confidence, enabling selective verification with lower false-trigger rates than random or top-variance routing.
-
-注意第 4 条不要写得太满。
-不要说：
-
-```text
-we solve hallucination mitigation
-```
-
-而说：
-
-```text
-we enable selective verification / selective correction
-```
-
----
-
-# 13. 最终判断
-
-这份意见里最重要的修改就是：
-
-> 不能只训练 FP/TN probe，然后直接拿去 gate predicted-Yes 样本；必须显式评估 TP 是否被误伤。
-
-这个修改非常关键，也很容易做。
-
-所以优化后的计划书核心变成：
-
-```text
-机制发现：
-top variance ≠ decision geometry；
-residual/tail/full difference 更接近 hallucination-sensitive correction。
-
-方法落地：
-用这些 geometry score 在 predicted-Yes 样本中选择性触发 verification。
-
-核心证明：
-在相同 trigger rate 下，
-geometry gate 比 random gate / top-4 gate 抓住更多 FP，
-同时比粗糙 gate 更少伤害 TP。
-```
-
-只要这个结果能跑出来，你这篇文章就不会显得空洞了。
-
----
-
-# 14. 2026-05-07 跨架构 user-content readout 结果分析
-
-本轮结果位于：
-
-```text
-outputs/stage_o_cross_model_user_readout/
-```
-
-新增部署视角分析：
-
-```text
-outputs/stage_o_cross_model_user_readout/audit/predicted_yes_gate_summary.csv
-outputs/stage_o_cross_model_user_readout/audit/predicted_yes_gate_trigger_rates.csv
-```
-
-## 14.1 读出修正确认有效
-
-四个模型的 hidden readout 都是：
-
-```text
-last_user_content_token
-```
-
-Qwen2-VL / Qwen2.5-VL 的 FP/TN probe 不再出现之前接近 1.0 的异常结果：
-
-| 模型 | best difference AUROC |
-| --- | ---: |
-| Qwen2-VL-7B | 0.772 |
-| Qwen2.5-VL-7B | 0.771 |
-
-这说明之前 Qwen 的异常高分基本来自 assistant generation prompt / next-token 读出混入，而不是稳定的跨模型 correction geometry。
-
-## 14.2 InternVL 仍然异常强，需要单独审计
-
-InternVL2 / InternVL2.5 的 raw_img 和 difference 在 FP/TN 上仍然接近完美：
-
-| 模型 | best raw_img AUROC | best difference AUROC |
+主要分析层为 L24，辅助层为 L20 / L32。主要任务分为两类：
+
+| 任务 | 部署含义 | 评价重点 |
+| --- | --- | --- |
+| FP vs TN | ground-truth = No 中区分错误 Yes 与正确 No | 机制分析、probe sanity、subspace discovery |
+| predicted-Yes FP vs TP | 部署时只知道模型预测 Yes，需区分 hallucinated Yes 与 correct Yes | warning precision、FP recall、TP damage、TP preserved |
+
+关键指标：
+
+| 指标 | 含义 |
+| --- | --- |
+| FP reduction | 原始 FP 中被修正为 No 的比例 |
+| TP preserved | 原始 TP 中仍保持 Yes 的比例 |
+| TP damage | `1 - TP preserved` |
+| Warning precision | 被 gate 触发样本中 FP 占比 |
+| Compute saved | 相对 always-on VCD/ICD 少跑的 predicted-Yes 二次处理比例 |
+| Accuracy delta | 相对原始模型 accuracy 的变化 |
+
+## 三、实验产物地图
+
+| 证据模块 | 关键文件 |
+| --- | --- |
+| 完整历史总结 | `notes/complete_experiment_summary.md` |
+| Stage T 选择性修正 | `notes/stage_t_selective_correction_results.md` |
+| Stage T margin-geometry 互补性 | `notes/stage_t_geometry_complementarity_results.md` |
+| Stage U 跨模型最小协议 | `notes/stage_u_unified_minimal_protocol.md` |
+| detector follow-up | `notes/detector_followup_summary.md` |
+| mechanism mitigation 任务书 | `mitigation_plan.md` |
+| mechanism mitigation MVP | `outputs/mechanism_mitigation/mvp/mvp_summary.md` |
+| mechanism mitigation follow-up | `outputs/mechanism_mitigation/followup/followup_summary.md` |
+| paper-ready mitigation tables | `outputs/mechanism_mitigation/paper_tables/mechanism_mitigation_paper_tables.md` |
+| LLaVA-13B minimal replication | `outputs/mechanism_mitigation/llava13b_minimal/report/llava13b_minimal_replication_summary.md` |
+
+## 四、结论 1：Top variance 不是 hallucination decision geometry
+
+早期谱分析显示 blind-reference difference 具有强低秩结构，但高方差方向并不等价于 hallucination 判别方向。跨模型最小协议进一步验证了这一点：LLaVA/Qwen 系列中 top-4 能解释大量方差，但 FP/TN AUROC 通常低于 full/tail difference。
+
+| Model | Readout | Layer | Top-4 Var | Top-4 AUROC | Full Diff AUROC | Tail AUROC |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| LLaVA-1.5-7B | `last_prompt_token` | 20 | 0.842 | 0.531 | 0.659 | 0.649 |
+| LLaVA-1.5-13B | `last_prompt_token` | 20 | 0.752 | 0.600 | 0.744 | 0.766 |
+| Qwen2-VL-7B | `last_user_content_token` | 20 | 0.645 | 0.528 | 0.612 | 0.529 |
+| Qwen2.5-VL-7B | `last_user_content_token` | 24 | 0.685 | 0.597 | 0.749 | 0.742 |
+| InternVL2-8B | `last_user_content_token` | 20 | 0.928 | 0.977 | 0.997 | 0.663 |
+| InternVL2.5-8B | `last_user_content_token` | 32 | 0.878 | 0.993 | 0.998 | 0.734 |
+
+解释口径：
+
+- LLaVA/Qwen 支持“方差主轴主要承载 image-conditioning backbone，而非 hallucination decision”的结论。
+- InternVL 是重要边界案例：它的 FP/TN separability 在 top coordinates 中已经接近完美，但后续 predicted-Yes 部署任务失败，说明 FP/TN 内部可分并不自动等于可部署 hallucination detector。
+
+因果证据也支持“tail/residual 不是无关噪声”。L24 tail ablation 在 TN 样本上有清晰剂量效应：
+
+| Layer / alpha | Yes rate | Median margin shift |
 | --- | ---: | ---: |
-| InternVL2-8B | 0.999 | 0.999 |
-| InternVL2.5-8B | 0.998 | 0.998 |
+| L24 alpha 4 | 0.000 | -0.750 |
+| L24 alpha 5 | 0.125 | -0.328 |
+| L24 alpha 6 | 0.563 | +0.016 |
+| L24 alpha 7 | 0.938 | +0.391 |
+| L24 alpha 8 | 1.000 | +0.934 |
 
-但这个强结果不能直接解释成 mitigation 能力。部署视角下，在 test split 的 predicted-Yes 样本中，full difference 对 FP-vs-TP 是反向的：
+这说明 L24 tail coordinates 对正确拒绝 TN 具有因果必要性；但 FP rescue 仍弱，64 个 FP 扩展样本中仅 3 个 borderline case 被翻转，因此 direct hidden steering 不能包装为可靠 mitigation。
 
-| 模型 | difference FP-vs-TN AUROC | difference FP-vs-TP AUROC |
+## 五、结论 2：Geometry 是 margin 的互补风险信号，不是 margin 替代品
+
+### 2.1 POPE strict split 上，margin+tail/full 显著优于 margin-only
+
+Detector follow-up 使用 `random -> popular -> adversarial` 严格协议：random 训练，popular 校准，adversarial 测试。
+
+| Method | AUROC | AUPRC | Warning precision @20% | FP recall @20% | TP damage @20% |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| yes/no margin | 0.848 | 0.401 | 0.404 | 0.667 | 0.155 |
+| margin + top16 | 0.853 | 0.447 | 0.389 | 0.624 | 0.154 |
+| margin + tail | 0.881 | 0.609 | 0.437 | 0.698 | 0.141 |
+| margin + full | 0.884 | 0.612 | 0.436 | 0.698 | 0.142 |
+
+Bootstrap 支持 margin+tail/full 的增益：相对 margin-only，margin+tail 的 AUROC +0.033、AUPRC +0.204、warning precision +0.033，且 TP damage -0.013；margin+full 类似，AUROC +0.037、AUPRC +0.208。
+
+### 2.2 固定划分 predicted-Yes 池中，low-margin 是强 baseline，geometry 提供低预算增益
+
+固定划分测试池包含 596 个 predicted-Yes 样本，其中 53 个 FP、543 个 TP，base FP prevalence 约 0.089。直接用高 margin 作为风险方向是错误的，因为高 yes/no margin 选择的是非常自信的 Yes；应使用 low-margin 作为 confidence baseline。
+
+在 20% predicted-Yes 触发预算下：
+
+| Gate | Triggered FP ratio | FP recall | TP damage | Warning precision |
+| --- | ---: | ---: | ---: | ---: |
+| low-margin only | 0.293 | 0.736 | 0.173 | 0.293 |
+| low-margin + FullD | 0.327 | 0.660 | 0.133 | 0.327 |
+| low-margin + PLS | 0.324 | 0.642 | 0.131 | 0.324 |
+| PLS only | 0.226 | 0.396 | 0.133 | 0.226 |
+| random gate | 0.088-0.093 | 0.155-0.233 | 0.156-0.222 | 0.088-0.093 |
+
+这组结果的正确解读是：low-margin 决定了最高 FP recall，但加入 geometry 后，在低预算下能提高 warning precision 并降低 TP damage。
+
+固定 trigger ablation 进一步给出 reviewer-facing 证据。在 10% 预算下，`Margin + PLS` 与 `Margin + full/tail` 都把 warning precision 从 margin-only 的 0.350 提升到 0.383，并把 TP damage 从 0.072 降到 0.068。
+
+### 2.3 Geometry 与 margin 相关但不冗余
+
+Stage T complementarity 分析中，geometry score 与 yes/no margin 的相关性较低：
+
+| Geometry score | Pearson vs margin | Spearman vs margin |
 | --- | ---: | ---: |
-| InternVL2-8B | 0.997 | 0.218 |
-| InternVL2.5-8B | 0.998 | 0.126 |
+| PLS32 | -0.231 | -0.197 |
+| FullD | -0.179 | -0.104 |
+| Tail | -0.201 | -0.104 |
 
-top 10% geometry trigger 对 InternVL 两个模型都没有抓到 FP：
+在 margin-only gate 已捕获 39/53 FP 后，仍有 14 个 margin-missed FP。PLS geometry 在 residual pool 上 AUROC = 0.633，并额外捕获 3/14 个 missed FP；full/tail 各捕获 4/14，但额外触发成本较高。这支撑“互补信号”而非“全局替代 margin”的写法。
 
-| 模型 | trigger | FP caught | TP damage |
+### 2.4 AMBER 外部迁移：tail warning 有信号，但 margin 仍更强
+
+AMBER 上存在两类结果，需要分开汇报：
+
+| 设置 | 最好方法 | Trigger | FP recall | TP damage | Warning precision | 结论 |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| geometry-only external top-rate | tail energy | 0.20 | 0.285 | 0.166 | 0.405 | 几何排序有外部信号，优于随机约 0.284 |
+| AMBER margin deployment | margin-only | 0.20 | 0.291 | 0.164 | 0.413 | 外部部署中 low-margin 仍最强 |
+| AMBER margin deployment | margin+tail | 0.20 | 0.225 | 0.190 | 0.319 | POPE-trained geometry 加到 AMBER margin 后反而降低 precision |
+
+因此外部结论应写成：geometry 在 AMBER 上有 modest ranking transfer，尤其 tail energy；但在 AMBER margin logits 可用时，low-margin 是更稳的外部 warning baseline，POPE-trained geometry 的外部组合迁移不稳定。
+
+## 六、结论 3：Prompt verification 弱，VCD/ICD 才是更合适的 correction operator
+
+Stage T 先测试了 gated verification prompt。固定划分上共有 513 个 gated predicted-Yes 样本，legacy prompt 的实际变化很少：
+
+| Original outcome | Verification Yes | Verification No |
+| --- | ---: | ---: |
+| TP | 460 | 7 |
+| FP | 37 | 9 |
+
+更强 prompt 反而更倾向复读 Yes：
+
+| Prompt | TP -> No | FP -> No |
+| --- | ---: | ---: |
+| legacy | 7 | 9 |
+| forced_evidence | 2 | 3 |
+| conservative | 1 | 2 |
+| internal_rationale | 3 | 6 |
+
+在 30% trigger 下，PLS gate 的 oracle FP reduction 可达 0.604，但 legacy prompt 实际仅 0.132；prompt wording 不是足够强的缓解算子。后续实验转向 VCD/ICD 是正确方向。
+
+## 七、结论 4：Always-on VCD/ICD 有效但伤 TP，selective routing 改善 tradeoff
+
+固定划分 predicted-Yes 池上，always-on VCD/ICD 会减少 FP，但 TP damage 明显：
+
+| Operator | Always FP reduction | TP preserved | Accuracy delta |
 | --- | ---: | ---: | ---: |
-| InternVL2-8B | 53 | 0 | 53 |
-| InternVL2.5-8B | 64 | 0 | 64 |
+| ICD-blind | 0.340 | 0.912 | -0.022 |
+| VCD-diffusion | 0.302 | 0.912 | -0.024 |
+| VCD-gray | 0.264 | 0.890 | -0.034 |
+| VCD-blur | 0.151 | 0.971 | -0.006 |
 
-因此 InternVL 的 FP/TN separability 更像是在区分“模型会回答 Yes 还是 No”的内部状态，而不是能安全路由 predicted-Yes 幻觉样本的 risk signal。
+Selective routing 把同一 correction operator 用到更集中的样本上，形成两种部署取向：
 
-## 14.3 部署 gate 的关键结论
+| Operator + Gate | Target | Trigger | FP reduction | TP preserved | Acc delta | Compute saved | 适用目标 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| ICD + low-margin+tail | 0.30 | 0.297 | 0.340 | 0.937 | -0.012 | 0.703 | 最大 FP suppression |
+| ICD + low-margin+PLS | 0.20 | 0.176 | 0.321 | 0.965 | -0.001 | 0.824 | 高 FP/trigger |
+| ICD + PLS | 0.30 | 0.284 | 0.283 | 0.976 | +0.001 | 0.716 | TP-preserving geometry-only |
+| ICD + FullD | 0.30 | 0.262 | 0.245 | 0.985 | +0.004 | 0.738 | 最平衡 accuracy/F1 |
+| ICD + margin+FullD | 0.30 | 0.267 | 0.170 | 0.994 | +0.004 | 0.733 | 极低 TP damage |
+| VCD-diffusion + low-margin+PLS | 0.30 | 0.273 | 0.283 | 0.948 | -0.010 | 0.727 | official VCD FP reduction |
 
-在 predicted-Yes test subset 上，margin entropy / low yes-margin 目前比 geometry gate 更可靠：
+Bootstrap 结果支持 tradeoff 的稳健性。例如：
 
-| 模型 | best geometry FP-vs-TP AUROC | margin entropy FP-vs-TP AUROC |
-| --- | ---: | ---: |
-| Qwen2-VL-7B | 0.703 raw_blind / 0.675 difference | 0.869 |
-| Qwen2.5-VL-7B | 0.765 raw_blind / 0.745 difference | 0.883 |
-| InternVL2-8B | 0.698 raw_blind / 0.218 difference | 0.883 |
-| InternVL2.5-8B | 0.697 raw_blind / 0.126 difference | 0.903 |
+| Row | Metric | Point | 95% CI |
+| --- | --- | ---: | --- |
+| ICD + low-margin+PLS @20% | FP reduction | 0.321 | [0.196, 0.452] |
+| ICD + low-margin+PLS @20% | TP preserved | 0.965 | [0.949, 0.980] |
+| ICD + full_probe @30% | FP reduction | 0.245 | [0.130, 0.370] |
+| ICD + full_probe @30% | TP preserved | 0.985 | [0.974, 0.994] |
+| ICD + margin+full @30% | Accuracy delta | +0.004 | [0.000, 0.010] |
 
-top 10% trigger 时：
+关键汇报措辞：
 
-| 模型 | score | FP recall | TP damage rate |
-| --- | --- | ---: | ---: |
-| Qwen2-VL-7B | difference | 0.286 | 0.093 |
-| Qwen2-VL-7B | margin entropy | 0.571 | 0.082 |
-| Qwen2.5-VL-7B | difference | 0.400 | 0.085 |
-| Qwen2.5-VL-7B | margin entropy | 0.360 | 0.087 |
-| InternVL2-8B | difference | 0.000 | 0.103 |
-| InternVL2-8B | margin entropy | 0.500 | 0.086 |
-| InternVL2.5-8B | difference | 0.000 | 0.109 |
-| InternVL2.5-8B | margin entropy | 0.511 | 0.068 |
+> Always-on VCD/ICD can reduce hallucinated Yes answers, but it over-corrects true positives. Geometry-guided routing turns VCD/ICD into a controllable FP-TP tradeoff: low-margin+geometry maximizes FP capture, while geometry-only or margin+geometry gives safer TP-preserving operating points.
 
-当前不能声称 geometry gate 已经优于 margin gate。更稳妥的表述是：
+## 八、结论 5：最新 mechanism mitigation 结果支持“过滤 correction spectrum”
+
+最新的 mitigation 任务进一步从 routing 推进到 subspace-filtered correction。核心思想是：不使用完整 ICD/VCD correction，而只保留 correction spectrum 中更相关的子空间：
 
 ```text
-Corrected user-content readout removes the Qwen prompt-readout artifact.
-Cross-architecture evidence for FP/TN geometry is mixed:
-Qwen shows moderate difference signal, while InternVL shows very strong FP/TN separability that does not transfer to predicted-Yes FP-vs-TP gating.
-For deployment, margin entropy remains the strongest single gate; geometry should next be tested only as a complementary signal combined with margin, not as a replacement.
+h' = h_orig + alpha * P_S(h_orig - h_neg)
 ```
 
-## 14.4 下一步
+其中 `S` 可以是 band 5-16、top4-complement、tail 等子空间。
 
-下一步应做真正的 selective gate 实验：
+### 5.1 Stage 1 decomposition：ICD-blind 的判别性贡献集中在非 full/top4 子空间
 
-1. 训练目标改成 predicted-Yes 内的 FP vs TP，或至少报告 FP/TN-trained score 在 FP-vs-TP 上的表现。
-2. 用 calibration split 选 threshold，不用 test split 选 top rate。
-3. 比较 random、margin entropy、geometry、margin+geometry。
-4. 主指标固定为 FP recall、TP damage、gate precision。
-5. 对 InternVL 追加审计：检查 readout token、raw_img 是否含有输出决策状态，必要时改用更早层或 pre-answer-free 的 forward 设定。
+对 L24 的 operator decomposition 显示，ICD-blind 的 top4/full 成分虽然贡献大，但对 FP 与 TP 的区分性并不强；band5-16 和 top4-complement 更有 FP-specific correction 倾向。
+
+| Operator | Band | FP positive rate | TP positive rate | FP-TP gap |
+| --- | --- | ---: | ---: | ---: |
+| ICD-blind | top4-complement | 0.811 | 0.518 | 0.293 |
+| ICD-blind | band5-16 | 0.808 | 0.582 | 0.226 |
+| ICD-blind | band17-64 | 0.725 | 0.542 | 0.182 |
+| ICD-blind | random12 | 0.997 | 0.988 | 0.009 |
+| VCD-diffusion | full | 0.599 | 0.582 | 0.016 |
+| VCD-diffusion | top4 | 0.361 | 0.349 | 0.012 |
+
+这直接解释了为什么 full ICD/VCD 会同时修 FP 和伤 TP：完整 correction 混入大量非判别成分；过滤到更合适的 band 后，FP-TP tradeoff 更好。
+
+### 5.2 Stage 2 / paper tables：Band5-16 ICD 是当前最佳 TP-safe 方法
+
+在 LLaVA-1.5-7B / fixed split test 上，Band5-16 ICD 取得当前最佳 TP-safe mitigation：
+
+| Method | FP reduction | TP preserved | Accuracy delta | Overall Yes rate | FP Yes rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base | 0.000 | 1.000 | 0.000 | 0.441 | 1.000 |
+| Full VCD-diffusion | 0.151 | 0.971 | -0.008 | 0.430 | 0.849 |
+| Tail VCD-diffusion | 0.264 | 0.961 | -0.005 | 0.430 | 0.736 |
+| Full ICD TP-safe | 0.283 | 0.972 | 0.000 | 0.419 | 0.717 |
+| Always ICD | 0.340 | 0.912 | -0.022 | 0.393 | 0.660 |
+| Gated ICD | 0.340 | 0.937 | -0.012 | 0.403 | 0.660 |
+| **Band5-16 ICD** | **0.396** | **0.959** | **+0.001** | **0.416** | **0.604** |
+
+随机控制表明该结果不是任意 12 维子空间都能做到：
+
+| Target | Random family | Target FP | Random FP mean | Random range | Percentile | Outperforms |
+| --- | --- | ---: | ---: | --- | ---: | ---: |
+| Band5-16 ICD | random12 | 0.396 | 0.165 | [0.000, 0.340] | 100 | 20/20 |
+| Top4-complement ICD | random4-complement | 0.321 | 0.283 | [0.283, 0.283] | 100 | 20/20 |
+| Tail VCD-diffusion | random-tail-dim | 0.264 | 0.148 | [0.075, 0.283] | 95 | 19/20 |
+
+Bootstrap comparison 支持 Band5-16 相对关键 baseline 的优势：
+
+| Comparison | Metric | A | B | Diff | 95% CI |
+| --- | --- | ---: | ---: | ---: | --- |
+| Band5-16 ICD vs Always ICD | TP preserved | 0.959 | 0.912 | +0.048 | [0.025, 0.073] |
+| Band5-16 ICD vs Always ICD | Accuracy delta | +0.001 | -0.022 | +0.023 | [0.012, 0.036] |
+| Band5-16 ICD vs Random12 ICD | FP reduction | 0.396 | 0.170 | +0.226 | [0.117, 0.345] |
+| Tail VCD vs Full VCD | FP reduction | 0.264 | 0.151 | +0.113 | [-0.016, 0.246] |
+
+No-bias audit 也很重要：Band5-16 ICD 不是简单地把模型整体推向 No。它保持 TN Yes rate 约 0.005，同时把 FP Yes rate 从 1.000 降到 0.604，TP Yes rate 保持 0.959，accuracy 从 base 0.863 提到 0.864。
+
+### 5.3 Reverse split 与 LLaVA-13B：正结果有边界
+
+Reverse split 中 Band5-16 ICD 仍 TP-safe，但不是最优：
+
+| Method | Calibrated on | Tested on | FP reduction | TP preserved | Accuracy delta |
+| --- | --- | --- | ---: | ---: | ---: |
+| Full ICD TP-safe | adversarial | random | 0.280 | 0.954 | -0.014 |
+| Band5-16 ICD | adversarial | random | 0.220 | 0.953 | -0.013 |
+| Random12 ICD | adversarial | random | 0.080 | 0.977 | -0.006 |
+| Tail VCD-diffusion | adversarial | random | 0.300 | 0.953 | -0.009 |
+
+LLaVA-13B minimal replication 提供方向性支持，但还不足以支撑 universal mitigation claim：
+
+| Criterion | Status | Value |
+| --- | --- | --- |
+| Detector margin+tail/full beats margin-only | pass | margin=0.339, tail=0.344, full=0.340 AUPRC |
+| Band5-16 TP-safe beats Full ICD TP-safe | pass | band FP reduction=0.133, full=0.033 |
+| Gated ICD keeps most Always ICD FP reduction with higher TP preserved | fail | gated 0.033/0.995, always 0.033/0.995 |
+| Always ICD shows stronger conservative bias than Base | fail | always yes=0.483, base yes=0.466 |
+
+LLaVA-13B mitigation表：
+
+| Method | FP reduction | TP preserved | Accuracy delta | Overall Yes rate | FP Yes rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base | 0.000 | 1.000 | 0.000 | 0.466 | 1.000 |
+| Full ICD TP-safe | 0.033 | 1.000 | +0.002 | 0.470 | 0.967 |
+| Band5-16 ICD | 0.133 | 0.963 | -0.010 | 0.450 | 0.867 |
+| Always ICD | 0.033 | 0.995 | -0.004 | 0.483 | 0.967 |
+| Gated ICD | 0.033 | 0.995 | -0.001 | 0.462 | 0.967 |
+| Random12 mean | 0.050 | 0.994 | +0.001 | 0.465 | 0.950 |
+| Random12 best | 0.083 | 0.988 | -0.002 | 0.458 | 0.917 |
+
+建议表述：LLaVA-13B 上 Band5-16 方向性优于 full ICD，但收益变小且有 accuracy cost；gated ICD 未显示额外优势。这应作为 scale-up boundary，而不是主负结果。
+
+## 九、跨模型边界：InternVL 证明 FP/TN probe 不等于 deployable detector
+
+Stage U 的关键边界发现是 InternVL：内部 FP/TN 分离接近完美，但 predicted-Yes FP/TP 部署 AUROC 很低。
+
+| Model | FP/TN Full AUROC | Pred-Yes Full AUROC | Pred-Yes Low-Margin AUROC | Flag |
+| --- | ---: | ---: | ---: | --- |
+| InternVL2-8B | 0.997 | 0.249 | 0.883 | near-perfect FP/TN but non-deployable |
+| InternVL2.5-8B | 0.998 | 0.126 | 0.903 | near-perfect FP/TN but non-deployable |
+
+原因从 score distribution 可见：InternVL 的 FP 和 TP 在 predicted-Yes 池内都被 geometry score 打到非常高，导致 FP/TP 不可区分。
+
+| Model | Outcome | N | Mean | Median | Q25 | Q75 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| InternVL2-8B | FP | 18 | 0.871 | 0.996 | 0.951 | 1.000 |
+| InternVL2-8B | TP | 513 | 0.945 | 1.000 | 0.999 | 1.000 |
+| InternVL2.5-8B | FP | 47 | 0.937 | 1.000 | 0.998 | 1.000 |
+| InternVL2.5-8B | TP | 589 | 0.987 | 1.000 | 1.000 | 1.000 |
+
+汇报中应把 InternVL 写成边界发现：内部 correction geometry 可以真实存在，但如果部署 population 从 FP/TN 变成 predicted-Yes FP/TP，信号可能饱和并失去路由价值。
+
+## 十、最终推荐汇报结构
+
+建议将报告组织为四页主线：
+
+1. **Mechanistic discovery**：Blind-reference differencing reveals layered correction geometry. Top variance carries image-conditioning backbone; hallucination-relevant signal is in residual/tail/supervised or mid-band coordinates.
+2. **Risk routing**：Geometry is complementary to low-margin confidence. It improves low-budget warning precision and provides TP-preserving routing choices, but it is not a global replacement for margin.
+3. **Mitigation method**：Subspace-filtered ICD, especially Band5-16 ICD, gives the strongest LLaVA-7B POPE TP-safe FP reduction: 0.396 FP reduction, 0.959 TP preserved, +0.001 accuracy delta.
+4. **Boundary and honesty**：Prompt verification is weak; AMBER transfer is modest; LLaVA-13B and InternVL show the method is not universal. The contribution should be framed as a mechanistically motivated FP-TP tradeoff improvement, not a universal hallucination solver.
+
+## 十一、可直接使用的核心表述
+
+中文汇报版：
+
+> 我们发现，视觉语言模型的盲参考差分 `d = z_blind - z_img` 形成了层次化 correction geometry。主方差方向主要反映图像条件化 backbone，并不等价于 hallucination 判别方向；真正与错误 Yes / 正确 No 相关的信号更多出现在 residual/tail、PLS/Fisher 以及 ICD 的 band 5-16 / top-complement 成分中。基于这一机制，我们不再使用完整 VCD/ICD correction，而是进行子空间过滤或选择性路由。在 LLaVA-1.5-7B / POPE fixed split 上，Band5-16 ICD 达到 0.396 FP reduction、0.959 TP preserved 和 +0.001 accuracy delta，优于 full VCD-diffusion、full ICD TP-safe 和 random12 控制。该方法的边界也很清楚：low-margin 仍是强 baseline，AMBER 和 LLaVA-13B 迁移更弱，InternVL 出现内部可分但部署不可用的反例。因此本文贡献应定位为 correction geometry 指导的可解释 tradeoff improvement，而不是通用幻觉检测或通用修复器。
+
+英文论文版：
+
+> Blind-reference differencing exposes a layered correction geometry in VLM hallucination. The dominant variance directions largely encode image-conditioning backbone rather than hallucination decision geometry, while hallucination-relevant correction signals concentrate in residual/tail, supervised, and mid-band subspaces. This enables targeted correction: filtering ICD to the Band5-16 subspace achieves 39.6% FP reduction with 95.9% TP preservation and a non-negative accuracy delta on the LLaVA-1.5-7B POPE fixed split, outperforming full VCD, TP-safe full ICD, and random subspace controls. The effect should be framed as a mechanistically grounded FP-TP tradeoff improvement: output low-margin remains a strong confidence baseline, external transfer is modest, and some architectures exhibit internally separable but non-deployable correction signals.
+
+## 十二、后续最小行动项
+
+| 优先级 | 行动 | 目的 |
+| --- | --- | --- |
+| P0 | 对 Band5-16 ICD 做更多 seed / split bootstrap | 巩固 paper 主表统计显著性 |
+| P0 | 扩展 LLaVA-13B full protocol，而不只 minimal replication | 判断 scale-up 是否稳定 |
+| P1 | 在 AMBER 上补齐与 Band5-16 ICD 对齐的 correction evaluation | 判断外部 mitigation 是否存在 |
+| P1 | 把 low-margin、geometry-only、low-margin+geometry 的 operating points 固定为三类部署策略 | 防止汇报时混淆 warning 与 correction 目标 |
+| P2 | 继续探索 stronger correction operator，而不是 prompt wording | prompt verification 已被证明较弱 |
+

@@ -19,13 +19,17 @@ Interpretation: the paired-difference family is competitive, but it should not b
 
 ## Mitigation / Rescue
 
-Available mitigation comparisons are Stage M first-token rescue rows. VCD/ICD and evidence-specific steering were not run in the current artifact set.
+Available mitigation comparisons include Stage M first-token rescue rows and Stage T official VCD diffusion baseline/routing rows.
 
 Top available rescue rows:
 
+- `official VCD baseline (diffusion, always-on)` / `vcd_diffusion`: rescue `0.302`, TN preservation ``, TP preservation `0.912`.
+- `official VCD + best FP-reduction gate` / `vcd_diffusion`: rescue `0.283`, TN preservation ``, TP preservation `0.948`.
 - `random steering control` / `random_tn_mean_correction`: rescue `0.250`, TN preservation ``, TP preservation ``.
 - `global mean correction` / `global_tn_mean_correction`: rescue `0.250`, TN preservation ``, TP preservation ``.
 - `local TN correction` / `same_object_tn_mean_correction`: rescue `0.250`, TN preservation ``, TP preservation ``.
+- `official VCD + best accuracy-preserving gate` / `vcd_diffusion`: rescue `0.151`, TN preservation ``, TP preservation `0.994`.
 - `no intervention` / `baseline`: rescue `0.000`, TN preservation `1.000`, TP preservation `1.000`.
+- `no intervention (Stage T VCD pool)` / `baseline`: rescue `0.000`, TN preservation ``, TP preservation `1.000`.
 
-Interpretation: current rescue is boundary-local and weak. Random/global TN-like controls remain competitive, so this is not yet a strong mitigation method.
+Interpretation: official always-on VCD reduces FPs but damages TPs; the selective routing rows preserve more TPs and expose the deployment tradeoff. Stage M steering remains boundary-local and weak.

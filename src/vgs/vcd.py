@@ -1,4 +1,12 @@
-"""Minimal contrastive decoding operators for Stage T selective correction."""
+"""Visual Contrastive Decoding operators for Stage T selective correction.
+
+The canonical `vcd_diffusion` path follows DAMO-NLP-SG/VCD: add diffusion
+noise to the processed image tensor, contrast clean and distorted logits, apply
+the adaptive plausibility cutoff, then decode from the resulting distribution.
+The local implementation keeps the same token-level rule but avoids monkey
+patching Transformers generation, which makes it stable for the HF LLaVA
+adapter used in this project.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +20,22 @@ from PIL import Image, ImageFilter, ImageOps
 
 from vgs.datasets import PopeSample
 from vgs.llava_hf import build_blind_prompt, build_pope_prompt, _move_inputs
+
+
+OFFICIAL_VCD_REPOSITORY = "https://github.com/DAMO-NLP-SG/VCD"
+OFFICIAL_VCD_SAMPLE = "vcd_utils/vcd_sample.py"
+OFFICIAL_VCD_NOISE = "vcd_utils/vcd_add_noise.py"
+
+
+def official_vcd_reference() -> dict[str, str]:
+    """Return the upstream implementation reference used by this baseline."""
+
+    return {
+        "repository": OFFICIAL_VCD_REPOSITORY,
+        "sampling_file": OFFICIAL_VCD_SAMPLE,
+        "noise_file": OFFICIAL_VCD_NOISE,
+        "local_adapter": "manual HF LLaVA decoding loop; no GenerationMixin monkey patch",
+    }
 
 
 @torch.inference_mode()
@@ -32,10 +56,10 @@ def generate_llava_contrastive_answer(
     top_k: int | None = None,
     generator: torch.Generator | None = None,
 ) -> str:
-    """Generate a yes/no answer with a simple VCD/ICD-style logit contrast.
+    """Generate a yes/no answer with a VCD/ICD-style logit contrast.
 
     `contrast_source` controls the weaker reference distribution:
-    - `diffusion`: VCD-style diffusion noise added to processed image tensors;
+    - `diffusion`: official VCD-style diffusion noise on processed image tensors;
     - `blur`: same image after Gaussian blur, a lightweight VCD proxy;
     - `gray`: same image converted to grayscale, then back to RGB;
     - `blind`: text-only prompt through the LLaVA language model, an ICD proxy.
@@ -102,13 +126,20 @@ def contrastive_logits(
     alpha: float = 1.0,
     beta: float = 0.1,
 ) -> torch.Tensor:
-    """Combine visual and contrast logits with optional visual plausibility mask."""
+    """Combine visual and contrast logits with the official VCD APC mask.
+
+    Official VCD computes `(1 + alpha) * logits_clean - alpha * logits_cd`
+    and masks tokens whose clean-image logit falls below
+    `max(logits_clean) + log(beta)`. This is equivalent to retaining tokens
+    with clean-image probability at least `beta` times the maximum probability,
+    but using the logit-space form mirrors the upstream implementation.
+    """
 
     combined = (1.0 + alpha) * visual_logits - alpha * contrast_logits
     if beta > 0:
-        visual_probs = torch.softmax(visual_logits, dim=-1)
-        max_prob = torch.max(visual_probs)
-        plausible = visual_probs >= beta * max_prob
+        beta_tensor = torch.tensor(beta, device=visual_logits.device, dtype=visual_logits.dtype)
+        cutoff = torch.log(beta_tensor) + visual_logits.max(dim=-1, keepdim=True).values
+        plausible = visual_logits >= cutoff
         if torch.any(plausible):
             combined = combined.masked_fill(~plausible, -torch.inf)
     return combined

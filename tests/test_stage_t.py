@@ -3,6 +3,7 @@ import pandas as pd
 import torch
 
 from scripts.analyze_stage_t_vcd_results import analyze_vcd_results
+from scripts.build_stage_s_baselines import _stage_t_vcd_mitigation_rows
 from scripts.build_stage_t_margin_geometry_ablation import build_margin_geometry_ablation
 from scripts.build_stage_t_external_warning import build_external_warning
 from scripts.build_stage_t_selective_warning import build_selective_warning_metrics
@@ -59,6 +60,15 @@ def test_contrastive_logits_prefers_visual_specific_token() -> None:
     assert torch.isclose(logits[1], torch.tensor(3.5))
 
 
+def test_contrastive_logits_uses_official_plausibility_cutoff() -> None:
+    visual = torch.tensor([0.0, 2.0, -3.0])
+    contrast = torch.zeros_like(visual)
+    logits = contrastive_logits(visual, contrast, alpha=1.0, beta=0.1)
+    assert torch.isfinite(logits[0])
+    assert torch.isfinite(logits[1])
+    assert torch.isneginf(logits[2])
+
+
 def test_diffusion_noise_preserves_image_tensor_shape() -> None:
     torch.manual_seed(0)
     image = torch.zeros(1, 3, 4, 4)
@@ -66,6 +76,72 @@ def test_diffusion_noise_preserves_image_tensor_shape() -> None:
     assert noisy.shape == image.shape
     assert noisy.dtype == image.dtype
     assert not torch.equal(noisy, image)
+
+
+def test_stage_s_loads_official_vcd_baseline_rows(tmp_path) -> None:
+    pd.DataFrame(
+        [
+            {
+                "layer": "",
+                "operator": "vcd_diffusion",
+                "method": "Original",
+                "gate_family": "none",
+                "score": "",
+                "target_trigger_rate_predicted_yes": 0.0,
+                "aggregation": "deterministic",
+                "triggered_fp_before": 0,
+                "fp_reduced_n": 0,
+                "fp_reduction": 0.0,
+                "tp_preserved": 1.0,
+                "trigger_rate_predicted_yes": 0.0,
+                "accuracy_before": 0.8,
+                "accuracy_after": 0.8,
+            },
+            {
+                "layer": "",
+                "operator": "vcd_diffusion",
+                "method": "Always VCD/ICD",
+                "gate_family": "always",
+                "score": "always_predicted_yes",
+                "target_trigger_rate_predicted_yes": 1.0,
+                "aggregation": "deterministic",
+                "triggered_fp_before": 10,
+                "fp_reduced_n": 3,
+                "fp_reduction": 0.3,
+                "tp_preserved": 0.9,
+                "trigger_rate_predicted_yes": 1.0,
+                "accuracy_before": 0.8,
+                "accuracy_after": 0.78,
+            },
+            {
+                "layer": 24,
+                "operator": "vcd_diffusion",
+                "method": "Low-margin+Geometry-gated VCD/ICD",
+                "gate_family": "low_margin_plus_geometry",
+                "score": "low_margin_plus_pls32_probe",
+                "target_trigger_rate_predicted_yes": 0.2,
+                "aggregation": "deterministic",
+                "triggered_fp_before": 6,
+                "fp_reduced_n": 4,
+                "fp_reduction": 0.4,
+                "tp_preserved": 0.95,
+                "trigger_rate_predicted_yes": 0.2,
+                "accuracy_before": 0.8,
+                "accuracy_after": 0.82,
+            },
+        ]
+    ).to_csv(tmp_path / "stage_t_vcd_metrics_vcd_diffusion.csv", index=False)
+    (tmp_path / "run_stage_t_vcd_eval_vcd_diffusion_summary.json").write_text(
+        '{"alpha":1.0,"beta":0.1,"noise_step":500,"decode_strategy":"sample"}',
+        encoding="utf-8",
+    )
+
+    rows = _stage_t_vcd_mitigation_rows(tmp_path)
+
+    assert any(row["baseline"] == "official VCD baseline (diffusion, always-on)" for row in rows)
+    best = [row for row in rows if row["baseline"] == "official VCD + best FP-reduction gate"][0]
+    assert best["fp_reduction_or_rescue_rate"] == 0.4
+    assert "DAMO-NLP-SG/VCD" in best["notes"]
 
 
 def test_stage_t_vcd_analysis_scores_geometry_gate(tmp_path) -> None:

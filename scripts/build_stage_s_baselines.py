@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
+import json
 import math
 import sys
 from typing import Any
@@ -186,6 +187,8 @@ def _mitigation_rows() -> list[dict[str, Any]]:
             "notes": "Baseline rows from Stage M first-token subset.",
         }
     )
+    vcd_rows = _stage_t_vcd_mitigation_rows()
+    rows.extend(vcd_rows)
     summary_path = Path("outputs/stage_m_local_rescue/local_rescue_summary.csv")
     if summary_path.exists():
         df = pd.read_csv(summary_path)
@@ -198,8 +201,8 @@ def _mitigation_rows() -> list[dict[str, Any]]:
             if setting:
                 setting["baseline"] = label
                 rows.append(setting)
-    rows.extend(
-        [
+    if not vcd_rows:
+        rows.append(
             {
                 "source": "not_run",
                 "baseline": "VCD or ICD baseline",
@@ -218,6 +221,9 @@ def _mitigation_rows() -> list[dict[str, Any]]:
                 "mean_no_minus_yes_gain": "",
                 "notes": "No VCD/ICD run or implementation artifact is available in this repository state.",
             },
+        )
+    rows.extend(
+        [
             {
                 "source": "not_run",
                 "baseline": "evidence-specific correction",
@@ -239,6 +245,181 @@ def _mitigation_rows() -> list[dict[str, Any]]:
         ]
     )
     return rows
+
+
+def _stage_t_vcd_mitigation_rows(
+    stage_t_dir: str | Path = "outputs/stage_t_selective_correction_fixed_ids",
+    operator: str = "vcd_diffusion",
+) -> list[dict[str, Any]]:
+    """Load official VCD baseline rows from Stage T artifacts when available."""
+
+    root = Path(stage_t_dir)
+    metrics_path = root / f"stage_t_vcd_metrics_{operator}.csv"
+    if not metrics_path.exists():
+        return []
+
+    df = pd.read_csv(metrics_path)
+    if df.empty or "method" not in df.columns:
+        return []
+
+    summary = _load_stage_t_vcd_summary(root, operator)
+    original = _first_method_row(df, "Original")
+    always = _first_method_row(df, "Always VCD/ICD")
+    if always is None:
+        return []
+
+    fp_total = _numeric(always.get("triggered_fp_before"), "")
+    rows: list[dict[str, Any]] = []
+    if original is not None:
+        rows.append(
+            _stage_t_vcd_row(
+                label="no intervention (Stage T VCD pool)",
+                baseline_type="none",
+                row=original,
+                root=root,
+                operator=operator,
+                summary=summary,
+                fp_total=fp_total,
+                note_prefix="Original predictions on the Stage T predicted-Yes VCD pool.",
+            )
+        )
+
+    rows.append(
+        _stage_t_vcd_row(
+            label="official VCD baseline (diffusion, always-on)",
+            baseline_type="external_vcd_baseline",
+            row=always,
+            root=root,
+            operator=operator,
+            summary=summary,
+            fp_total=fp_total,
+            note_prefix=(
+                "Official VCD-style baseline using diffusion-noised image tensors, "
+                "contrastive logits, adaptive plausibility cutoff, and sampling."
+            ),
+        )
+    )
+
+    gated = df[
+        ~df["method"].isin(["Original", "Always VCD/ICD"])
+        & ~df["method"].astype(str).str.startswith("Random-gated", na=False)
+        & (df["aggregation"].astype(str) == "deterministic")
+    ].copy()
+    if gated.empty:
+        return rows
+
+    selected: list[tuple[str, str, pd.Series]] = [
+        (
+            "official VCD + best FP-reduction gate",
+            "external_vcd_selective_routing",
+            _best_vcd_setting(gated, ["fp_reduction", "tp_preserved", "accuracy_after"]),
+        ),
+        (
+            "official VCD + best accuracy-preserving gate",
+            "external_vcd_selective_routing",
+            _best_vcd_setting(gated, ["accuracy_after", "tp_preserved", "fp_reduction"]),
+        ),
+    ]
+    seen: set[tuple[str, str, str]] = set()
+    for label, baseline_type, row in selected:
+        key = (
+            str(row.get("method", "")),
+            str(row.get("score", "")),
+            _fmt(row.get("target_trigger_rate_predicted_yes", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            _stage_t_vcd_row(
+                label=label,
+                baseline_type=baseline_type,
+                row=row,
+                root=root,
+                operator=operator,
+                summary=summary,
+                fp_total=fp_total,
+                note_prefix="Selective routing row from Stage T gated VCD evaluation.",
+            )
+        )
+    return rows
+
+
+def _stage_t_vcd_row(
+    label: str,
+    baseline_type: str,
+    row: pd.Series,
+    root: Path,
+    operator: str,
+    summary: dict[str, Any],
+    fp_total: Any,
+    note_prefix: str,
+) -> dict[str, Any]:
+    trigger_rate = _numeric(row.get("trigger_rate_predicted_yes"), "")
+    accuracy_delta = _numeric(row.get("accuracy_after"), math.nan) - _numeric(row.get("accuracy_before"), math.nan)
+    is_no_intervention = baseline_type == "none"
+    gate = _clean_text(row.get("score")) or _clean_text(row.get("gate_family")) or "none"
+    intervention = "baseline" if is_no_intervention else operator
+    retrieval_mode = "none" if is_no_intervention else "diffusion_noised_image_tensor"
+    source_note = (
+        "Same predicted-Yes pool used for the official VCD baseline."
+        if is_no_intervention
+        else "Reference: DAMO-NLP-SG/VCD (vcd_utils/vcd_sample.py and vcd_utils/vcd_add_noise.py)."
+    )
+    decode_note = (
+        ""
+        if is_no_intervention
+        else (
+            f"alpha={summary.get('alpha', '')}, beta={summary.get('beta', '')}, "
+            f"noise_step={summary.get('noise_step', '')}, "
+            f"decode={summary.get('decode_strategy', '')}."
+        )
+    )
+    implementation_note = f"{decode_note} {source_note}".strip()
+    return {
+        "source": str(root),
+        "baseline": label,
+        "baseline_type": baseline_type,
+        "availability": "available",
+        "layer": _optional_int(row.get("layer")),
+        "gate": gate,
+        "intervention": intervention,
+        "retrieval_mode": retrieval_mode,
+        "alpha": "" if is_no_intervention else _numeric(summary.get("alpha"), ""),
+        "fp_n": _optional_int(fp_total),
+        "fp_reduction_or_rescue_rate": _numeric(row.get("fp_reduction"), ""),
+        "tn_preservation": "",
+        "tp_preservation": _numeric(row.get("tp_preserved"), ""),
+        "unknown_rate": "",
+        "mean_no_minus_yes_gain": "",
+        "notes": (
+            f"{note_prefix} method={row.get('method', '')}; "
+            f"trigger_rate={_fmt(trigger_rate)}; "
+            f"triggered_fp={_optional_int(row.get('triggered_fp_before'))}; "
+            f"fp_reduced={_optional_int(row.get('fp_reduced_n'))}; "
+            f"accuracy_delta={_fmt(accuracy_delta)}. {implementation_note} "
+            "TN preservation is not applicable because Stage T VCD is evaluated on the predicted-Yes FP/TP pool."
+        ),
+    }
+
+
+def _load_stage_t_vcd_summary(root: Path, operator: str) -> dict[str, Any]:
+    path = root / f"run_stage_t_vcd_eval_{operator}_summary.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _first_method_row(df: pd.DataFrame, method: str) -> pd.Series | None:
+    group = df[df["method"] == method]
+    return None if group.empty else group.iloc[0]
+
+
+def _best_vcd_setting(df: pd.DataFrame, metrics: list[str]) -> pd.Series:
+    return df.sort_values(metrics, ascending=[False] * len(metrics)).iloc[0]
 
 
 def _best_mitigation_setting(df: pd.DataFrame, interventions: list[str]) -> dict[str, Any] | None:
@@ -335,6 +516,18 @@ def _write_note(note_path: str | Path, detection_rows: list[dict[str, Any]], mit
     det_available["auroc_num"] = pd.to_numeric(det_available["auroc"], errors="coerce")
     mit_available = mit[mit["availability"].astype(str).str.startswith("available")].copy()
     mit_available["rescue_num"] = pd.to_numeric(mit_available["fp_reduction_or_rescue_rate"], errors="coerce")
+    has_vcd = mit_available["baseline_type"].astype(str).str.contains("vcd", case=False, na=False).any()
+    mitigation_scope = (
+        "Available mitigation comparisons include Stage M first-token rescue rows and "
+        "Stage T official VCD diffusion baseline/routing rows."
+        if has_vcd
+        else "Available mitigation comparisons are Stage M first-token rescue rows. VCD/ICD and evidence-specific steering were not run in the current artifact set."
+    )
+    mitigation_interpretation = (
+        "Interpretation: official always-on VCD reduces FPs but damages TPs; the selective routing rows preserve more TPs and expose the deployment tradeoff. Stage M steering remains boundary-local and weak."
+        if has_vcd
+        else "Interpretation: current rescue is boundary-local and weak. Random/global TN-like controls remain competitive, so this is not yet a strong mitigation method."
+    )
     lines = [
         "# Baseline Positioning",
         "",
@@ -354,7 +547,7 @@ def _write_note(note_path: str | Path, detection_rows: list[dict[str, Any]], mit
             "",
             "## Mitigation / Rescue",
             "",
-            "Available mitigation comparisons are Stage M first-token rescue rows. VCD/ICD and evidence-specific steering were not run in the current artifact set.",
+            mitigation_scope,
             "",
             "Top available rescue rows:",
             "",
@@ -371,7 +564,7 @@ def _write_note(note_path: str | Path, detection_rows: list[dict[str, Any]], mit
     lines.extend(
         [
             "",
-            "Interpretation: current rescue is boundary-local and weak. Random/global TN-like controls remain competitive, so this is not yet a strong mitigation method.",
+            mitigation_interpretation,
         ]
     )
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -384,6 +577,34 @@ def _fmt(value: Any) -> str:
         return f"{float(value):.3f}"
     except (TypeError, ValueError):
         return str(value)
+
+
+def _numeric(value: Any, default: Any) -> Any:
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _optional_int(value: Any) -> int | str:
+    numeric = _numeric(value, "")
+    if numeric == "":
+        return ""
+    return int(numeric)
+
+
+def _clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value)
+    return "" if text.lower() == "nan" else text
 
 
 def _fieldnames(rows: list[dict[str, Any]]) -> list[str]:
