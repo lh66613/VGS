@@ -5,6 +5,7 @@ from pathlib import Path
 import argparse
 import hashlib
 import math
+import re
 import sys
 from typing import Any
 
@@ -72,6 +73,8 @@ def main() -> None:
     parser.add_argument("--readout-position", default="last_prompt_token")
     parser.add_argument("--blur-radius", type=float, default=5.0)
     parser.add_argument("--noise-step", type=int, default=500)
+    parser.add_argument("--yes-token-ids", nargs="+", type=int, default=None)
+    parser.add_argument("--no-token-ids", nargs="+", type=int, default=None)
     parser.add_argument("--output-dir", default="outputs/mechanism_mitigation/operator_geometry")
     args = parser.parse_args()
 
@@ -117,8 +120,8 @@ def main() -> None:
     if args.max_samples is not None:
         rows = rows[: args.max_samples]
 
-    yes_ids = candidate_token_ids(bundle.tokenizer, YES_CANDIDATES)
-    no_ids = candidate_token_ids(bundle.tokenizer, NO_CANDIDATES)
+    yes_ids = sorted(set(args.yes_token_ids or candidate_token_ids(bundle.tokenizer, YES_CANDIDATES)))
+    no_ids = sorted(set(args.no_token_ids or candidate_token_ids(bundle.tokenizer, NO_CANDIDATES)))
     if not yes_ids or not no_ids:
         raise ValueError("Could not resolve yes/no candidate token IDs.")
     yes_weight, no_weight = _selected_lm_head_weights(bundle.model, yes_ids, no_ids)
@@ -158,6 +161,9 @@ def main() -> None:
                 out_row = {
                     "sample_id": str(row["sample_id"]),
                     "source_subset": row.get("subset", ""),
+                    "benchmark": row.get("benchmark", ""),
+                    "dimension": row.get("dimension", ""),
+                    "annotation_type": row.get("annotation_type", ""),
                     "label": row.get("label", ""),
                     "outcome": row.get("outcome", ""),
                     "parsed_prediction": row.get("parsed_prediction", ""),
@@ -175,13 +181,16 @@ def main() -> None:
                 for name, projector in bases_by_layer[layer].items():
                     component = projector(delta)
                     energy = float(torch.dot(component, component).item())
-                    out_row[f"energy_{name}"] = energy
-                    out_row[f"energy_frac_{name}"] = energy / delta_norm_sq if delta_norm_sq > 0 else math.nan
-                    out_row[f"dmargin_no_minus_yes_{name}"] = _no_minus_yes_contribution(
+                    yes_logit, no_logit = _yes_no_logit_contribution(
                         component,
                         yes_weight,
                         no_weight,
                     )
+                    out_row[f"energy_{name}"] = energy
+                    out_row[f"energy_frac_{name}"] = energy / delta_norm_sq if delta_norm_sq > 0 else math.nan
+                    out_row[f"dlogit_yes_{name}"] = yes_logit
+                    out_row[f"dlogit_no_{name}"] = no_logit
+                    out_row[f"dmargin_no_minus_yes_{name}"] = no_logit - yes_logit
                 out_rows.append(out_row)
 
     output_root = Path(args.output_dir)
@@ -333,9 +342,37 @@ def _subspace_bases(vh: np.ndarray, names: list[str], seed: int) -> dict[str, An
                 np.random.default_rng(_stable_seed(seed, name)),
             )
             projectors[name] = _basis_projector(random_tail_basis)
+        elif match := re.fullmatch(r"band(\d+)_(\d+)", name):
+            start, end = _one_indexed_interval(match.group(1), match.group(2), basis.shape[1])
+            projectors[name] = _basis_projector(basis[:, start:end])
+        elif match := re.fullmatch(r"v(\d+)", name):
+            start, end = _one_indexed_interval(match.group(1), match.group(1), basis.shape[1])
+            projectors[name] = _basis_projector(basis[:, start:end])
+        elif match := re.fullmatch(r"band(\d+)_(\d+)_minus_v(\d+)", name):
+            start, end = _one_indexed_interval(match.group(1), match.group(2), basis.shape[1])
+            remove_start, remove_end = _one_indexed_interval(match.group(3), match.group(3), basis.shape[1])
+            keep = [idx for idx in range(start, end) if not remove_start <= idx < remove_end]
+            projectors[name] = _basis_projector(basis[:, keep])
+        elif match := re.fullmatch(r"randcontig(\d+)_s(\d+)", name):
+            width = max(1, int(match.group(1)))
+            rng = np.random.default_rng(_stable_seed(seed, name))
+            max_start = max(0, basis.shape[1] - width)
+            start = int(rng.integers(0, max_start + 1)) if max_start else 0
+            end = min(basis.shape[1], start + width)
+            projectors[name] = _basis_projector(basis[:, start:end])
         else:
             raise ValueError(f"Unsupported subspace name: {name}")
     return projectors
+
+
+def _one_indexed_interval(start_text: str, end_text: str, max_dim: int) -> tuple[int, int]:
+    start = int(start_text)
+    end = int(end_text)
+    if start < 1 or end < start:
+        raise ValueError(f"Invalid 1-indexed subspace interval: {start_text}_{end_text}")
+    start_idx = min(start - 1, max_dim)
+    end_idx = min(end, max_dim)
+    return start_idx, end_idx
 
 
 def _stable_seed(seed: int, name: str) -> int:
@@ -364,15 +401,15 @@ def _no_minus_yes(logits: torch.Tensor, yes_ids: list[int], no_ids: list[int]) -
     return -_yes_minus_no(logits, yes_ids, no_ids)
 
 
-def _no_minus_yes_contribution(
+def _yes_no_logit_contribution(
     component: torch.Tensor,
     yes_weight: torch.Tensor,
     no_weight: torch.Tensor,
-) -> float:
+) -> tuple[float, float]:
     component = component.float().cpu()
     yes_value = float(torch.max(yes_weight @ component).item())
     no_value = float(torch.max(no_weight @ component).item())
-    return no_value - yes_value
+    return yes_value, no_value
 
 
 def _fieldnames(rows: list[dict[str, Any]]) -> list[str]:
